@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="LogProof preserves an RFC 5424 syslog record and maps it to a traceable structured event">
+  <img src="./assets/readme/logproof-processing-hero.png" width="100%" alt="LogProof keeps raw security logs traceable through normalization and parser review">
 </p>
 
 <h1 align="center">LogProof</h1>
