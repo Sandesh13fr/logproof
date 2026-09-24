@@ -343,6 +343,44 @@ def events(limit: int = 60) -> list[dict[str, Any]]:
     return [row_to_event(row) for row in rows]
 
 
+@app.get("/api/events/page")
+def events_page(limit: int = 20, offset: int = 0, q: str = "") -> dict[str, Any]:
+    page_limit = max(1, min(limit, 100))
+    page_offset = max(0, offset)
+    search = q.strip()
+    clauses: list[str] = []
+    params: list[Any] = []
+    if search:
+        normalized_search = re.sub(r"[^a-z0-9]", "", search.casefold())
+        source_ids = [
+            source_id
+            for source_id, (name, _) in SOURCES.items()
+            if search.casefold() in source_id.casefold()
+            or search.casefold() in name.casefold()
+            or normalized_search
+            in re.sub(r"[^a-z0-9]", "", source_id.casefold())
+        ]
+        search_clauses = ["receipt_id LIKE ?"]
+        params.append(f"%{search}%")
+        if source_ids:
+            search_clauses.append(f"source_id IN ({','.join('?' for _ in source_ids)})")
+            params.extend(source_ids)
+        clauses.append(f"({' OR '.join(search_clauses)})")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with connect() as db:
+        total = db.execute(f"SELECT count(*) FROM events {where}", params).fetchone()[0]
+        rows = db.execute(
+            f"SELECT * FROM events {where} ORDER BY rowid DESC LIMIT ? OFFSET ?",
+            [*params, page_limit, page_offset],
+        ).fetchall()
+    return {
+        "items": [row_to_event(row) for row in rows],
+        "total": total,
+        "limit": page_limit,
+        "offset": page_offset,
+    }
+
+
 @app.get("/api/events/{event_id}")
 def event(event_id: str) -> dict[str, Any]:
     return get_event(event_id)

@@ -7,6 +7,7 @@ import {
   Activity,
   ArrowRight,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -77,6 +78,12 @@ type Event = {
   shape: Record<string, string>;
   drift: string[];
 };
+type EventPage = {
+  items: Event[];
+  total: number;
+  limit: number;
+  offset: number;
+};
 type Overview = {
   accepted: number;
   quarantined: number;
@@ -135,6 +142,7 @@ type Registry = {
 };
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const HOSTED = API.startsWith("https://");
+const PAGE_SIZE = 20;
 const names: Record<string, string> = {
   paloalto_firewall: "Palo Alto-style Firewall",
   cisco_router: "Cisco-style Router",
@@ -170,6 +178,62 @@ async function call<T>(
         `Request failed: ${response.status}`,
     );
   return response.json();
+}
+
+function getEventsPage(offset: number, query = "") {
+  const params = new URLSearchParams({
+    limit: String(PAGE_SIZE),
+    offset: String(offset),
+  });
+  if (query.trim()) params.set("q", query.trim());
+  return call<EventPage>(`/api/events/page?${params.toString()}`);
+}
+
+function Pagination({
+  page,
+  total,
+  onPageChange,
+  label,
+}: {
+  page: number;
+  total: number;
+  onPageChange: (page: number) => void;
+  label: string;
+}) {
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const first = total === 0 ? 0 : page * PAGE_SIZE + 1;
+  const last = Math.min((page + 1) * PAGE_SIZE, total);
+
+  return (
+    <nav className="pagination-bar" aria-label={label}>
+      <span className="pagination-summary" aria-live="polite">
+        {total === 0 ? "No receipts" : `Showing ${first}–${last} of ${total}`}
+      </span>
+      <div className="pagination-controls">
+        <span className="pagination-page">
+          Page {page + 1} of {pageCount}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          aria-label={`Previous ${label.toLowerCase()} page`}
+          disabled={page <= 0}
+          onClick={() => onPageChange(page - 1)}
+        >
+          <ChevronLeft data-icon="inline-start" /> Previous
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          aria-label={`Next ${label.toLowerCase()} page`}
+          disabled={page + 1 >= pageCount}
+          onClick={() => onPageChange(page + 1)}
+        >
+          Next <ChevronRight data-icon="inline-end" />
+        </Button>
+      </div>
+    </nav>
+  );
 }
 function Status({ value }: { value: string }) {
   return (
@@ -315,8 +379,13 @@ export default function Home() {
   const [tab, setTab] = useState("overview");
   const [overview, setOverview] = useState<Overview | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
+  const [livePage, setLivePage] = useState(0);
+  const [liveData, setLiveData] = useState<EventPage | null>(null);
+  const [evidencePage, setEvidencePage] = useState(0);
+  const [evidenceData, setEvidenceData] = useState<EventPage | null>(null);
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedRecord, setSelectedRecord] = useState<Event | null>(null);
   const [evidence, setEvidence] = useState<Evidence | null>(null);
   const [field, setField] = useState<string | null>(null);
   const [replay, setReplay] = useState<Replay | null>(null);
@@ -336,11 +405,7 @@ export default function Home() {
       setEvents(nextEvents);
       setRegistry(nextRegistry);
       setError("");
-      setSelected((current) =>
-        current && nextEvents.some((item) => item.event_id === current)
-          ? current
-          : nextEvents[0]?.event_id || null,
-      );
+      setSelected((current) => current || nextEvents[0]?.event_id || null);
     } catch {
       setError(
         HOSTED
@@ -349,6 +414,58 @@ export default function Home() {
       );
     }
   }, []);
+  useEffect(() => {
+    if (tab !== "live") return;
+    let current = true;
+    const load = () =>
+      void getEventsPage(livePage * PAGE_SIZE)
+        .then((data) => {
+          if (!current) return;
+          setLiveData(data);
+          const lastPage = Math.max(0, Math.ceil(data.total / PAGE_SIZE) - 1);
+          if (livePage > lastPage) setLivePage(lastPage);
+        })
+        .catch((cause) => {
+          if (current)
+            setError(
+              cause instanceof Error
+                ? cause.message
+                : "Could not load receipts.",
+            );
+        });
+    load();
+    const timer = window.setInterval(load, 2500);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [tab, livePage]);
+  useEffect(() => {
+    if (tab !== "evidence") return;
+    let current = true;
+    const load = () =>
+      void getEventsPage(evidencePage * PAGE_SIZE, query)
+        .then((data) => {
+          if (!current) return;
+          setEvidenceData(data);
+          const lastPage = Math.max(0, Math.ceil(data.total / PAGE_SIZE) - 1);
+          if (evidencePage > lastPage) setEvidencePage(lastPage);
+        })
+        .catch((cause) => {
+          if (current)
+            setError(
+              cause instanceof Error
+                ? cause.message
+                : "Could not load receipts.",
+            );
+        });
+    load();
+    const timer = window.setInterval(load, 5000);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [tab, evidencePage, query]);
   useEffect(() => {
     const initial = window.setTimeout(() => void refresh(), 0);
     const id = window.setInterval(() => void refresh(), 2500);
@@ -361,15 +478,28 @@ export default function Home() {
     window.scrollTo(0, 0);
   }, [tab]);
   const selectedEvent = useMemo(
-    () => events.find((item) => item.event_id === selected) || null,
-    [events, selected],
+    () =>
+      events.find((item) => item.event_id === selected) ||
+      evidenceData?.items.find((item) => item.event_id === selected) ||
+      (selectedRecord?.event_id === selected ? selectedRecord : null) ||
+      null,
+    [events, evidenceData, selected, selectedRecord],
   );
+  const selectedReceiptId = selectedEvent?.receipt_id;
   useEffect(() => {
-    if (!selectedEvent) return;
-    void call<Evidence>(`/api/evidence/${selectedEvent.receipt_id}`)
-      .then(setEvidence)
-      .catch(() => setEvidence(null));
-  }, [selectedEvent]);
+    if (!selectedReceiptId) return;
+    let current = true;
+    void call<Evidence>(`/api/evidence/${selectedReceiptId}`)
+      .then((data) => {
+        if (current) setEvidence(data);
+      })
+      .catch(() => {
+        if (current) setEvidence(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [selectedReceiptId]);
   async function act(name: string, path: string, body?: unknown) {
     setBusy(name);
     setError("");
@@ -398,6 +528,8 @@ export default function Home() {
   }
   function showEvidence(eventId: string) {
     setSelected(eventId);
+    const record = liveData?.items.find((item) => item.event_id === eventId);
+    if (record) setSelectedRecord(record);
     setTab("evidence");
   }
   const driftEvents = events.filter((item) => item.drift.length > 0),
@@ -801,34 +933,52 @@ export default function Home() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {events.map((item) => (
-                        <TableRow key={item.event_id}>
-                          <TableCell className="mono">
-                            {item.received_at.slice(11, 19)}
-                          </TableCell>
-                          <TableCell className="cell-strong">
-                            {names[item.source_id]}
-                          </TableCell>
-                          <TableCell>{item.raw_format}</TableCell>
-                          <TableCell>
-                            <Status value={item.quality.status} />
-                          </TableCell>
-                          <TableCell className="mono">
-                            {item.receipt_id}
-                          </TableCell>
-                          <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => showEvidence(item.event_id)}
-                            >
-                              Inspect <ArrowRight data-icon="inline-end" />
-                            </Button>
+                      {liveData?.items.length ? (
+                        liveData.items.map((item) => (
+                          <TableRow key={item.event_id}>
+                            <TableCell className="mono">
+                              {item.received_at.slice(11, 19)}
+                            </TableCell>
+                            <TableCell className="cell-strong">
+                              {names[item.source_id]}
+                            </TableCell>
+                            <TableCell>{item.raw_format}</TableCell>
+                            <TableCell>
+                              <Status value={item.quality.status} />
+                            </TableCell>
+                            <TableCell className="mono">
+                              {item.receipt_id}
+                            </TableCell>
+                            <TableCell>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => showEvidence(item.event_id)}
+                              >
+                                Inspect <ArrowRight data-icon="inline-end" />
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={6} className="pagination-empty">
+                            {liveData
+                              ? "No receipts yet."
+                              : "Loading receipts…"}
                           </TableCell>
                         </TableRow>
-                      ))}
+                      )}
                     </TableBody>
                   </Table>
+                  {liveData && (
+                    <Pagination
+                      page={livePage}
+                      total={liveData.total}
+                      onPageChange={setLivePage}
+                      label="Live receipts pagination"
+                    />
+                  )}
                 </CardContent>
               </Card>
               {overview && (
@@ -865,37 +1015,56 @@ export default function Home() {
                         aria-label="Search receipts"
                         placeholder="Search receipt or source"
                         value={query}
-                        onChange={(event) => setQuery(event.target.value)}
+                        onChange={(event) => {
+                          setQuery(event.target.value);
+                          setEvidencePage(0);
+                          setEvidenceData(null);
+                        }}
                       />
                     </label>
                     <div className="receipt-list">
-                      {events
-                        .filter((item) =>
-                          `${item.receipt_id} ${names[item.source_id]}`
-                            .toLowerCase()
-                            .includes(query.toLowerCase()),
-                        )
-                        .map((item) => (
-                          <button
-                            key={item.event_id}
-                            className={`receipt-item ${selected === item.event_id ? "is-selected" : ""}`}
-                            onClick={() => {
-                              setSelected(item.event_id);
-                              setField(null);
-                            }}
-                          >
-                            <div>
-                              <strong>{names[item.source_id]}</strong>
-                              <Status value={item.quality.status} />
-                            </div>
-                            <span className="mono">{item.receipt_id}</span>
-                          </button>
-                        ))}
+                      {evidenceData?.items.map((item) => (
+                        <button
+                          key={item.event_id}
+                          className={`receipt-item ${selected === item.event_id ? "is-selected" : ""}`}
+                          onClick={() => {
+                            setSelected(item.event_id);
+                            setSelectedRecord(item);
+                            setField(null);
+                          }}
+                        >
+                          <div>
+                            <strong>{names[item.source_id]}</strong>
+                            <Status value={item.quality.status} />
+                          </div>
+                          <span className="mono">{item.receipt_id}</span>
+                        </button>
+                      ))}
+                      {evidenceData && evidenceData.items.length === 0 && (
+                        <p className="receipt-empty">
+                          {query.trim()
+                            ? "No receipts match your search."
+                            : "No receipts yet."}
+                        </p>
+                      )}
+                      {!evidenceData && (
+                        <p className="receipt-empty">Loading receipts…</p>
+                      )}
                     </div>
+                    {evidenceData && (
+                      <Pagination
+                        page={evidencePage}
+                        total={evidenceData.total}
+                        onPageChange={setEvidencePage}
+                        label="Evidence receipts pagination"
+                      />
+                    )}
                   </CardContent>
                 </Card>
                 <div className="evidence-main">
-                  {selectedEvent && evidence ? (
+                  {selectedEvent &&
+                  evidence &&
+                  evidence.receipt_id === selectedEvent.receipt_id ? (
                     <>
                       <Card className="panel evidence-summary">
                         <CardContent>
@@ -1508,6 +1677,9 @@ export default function Home() {
             disabled={!!busy}
             onClick={() => {
               setReplay(null);
+              setSelected(null);
+              setSelectedRecord(null);
+              setEvidence(null);
               void act("Demo reset", "/api/simulator/scenario/reset");
               setTab("overview");
             }}

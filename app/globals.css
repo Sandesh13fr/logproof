@@ -779,6 +779,38 @@ select:focus-visible {
   font-weight: 700;
   color: #2b4053;
 }
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 2px 0;
+  margin-top: 10px;
+  border-top: 1px solid #edf1f4;
+}
+.pagination-summary,
+.pagination-page {
+  color: #6b7d8f;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.pagination-controls button {
+  min-height: 32px;
+}
+.pagination-empty,
+.receipt-empty {
+  color: #77899a;
+  text-align: center;
+  font-size: 12px;
+}
+.receipt-empty {
+  padding: 16px 10px;
+}
 .mono {
   font-family: var(--font-geist-mono);
   font-size: 10px;
@@ -1438,6 +1470,14 @@ select:focus-visible {
   .section-heading {
     align-items: start;
     flex-direction: column;
+  }
+  .pagination-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .pagination-controls {
+    flex-wrap: wrap;
+    justify-content: space-between;
   }
   .heading-actions {
     flex-wrap: wrap;
