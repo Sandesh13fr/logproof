@@ -12,6 +12,7 @@ import {
   CircleAlert,
   Clock3,
   Database,
+  Download,
   FileCode2,
   Fingerprint,
   GitCompareArrows,
@@ -66,7 +67,21 @@ type Event = {
   sha256: string;
   parser_version: string;
   raw_format: string;
-  normalized: Record<string, unknown>;
+  normalized: Record<string, unknown> & {
+    source_label?: string | null;
+    evidence?: {
+      dataset?: {
+        name: string;
+        url: string;
+        license: string;
+        artifact_id: string;
+        row_index: number;
+        organization: string;
+        pipeline: string;
+        label_note: string;
+      };
+    };
+  };
   quality: {
     status: string;
     confidence: number;
@@ -97,6 +112,7 @@ type Overview = {
   }[];
   registry: Record<string, string>;
   simulator_running: boolean;
+  dataset_samples: number;
 };
 type Evidence = {
   receipt_id: string;
@@ -144,6 +160,7 @@ const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const HOSTED = API.startsWith("https://");
 const PAGE_SIZE = 20;
 const names: Record<string, string> = {
+  witfoo_soc: "WitFoo SOC dataset",
   paloalto_firewall: "Palo Alto-style Firewall",
   cisco_router: "Cisco-style Router",
   nginx_access: "NGINX Access",
@@ -514,6 +531,48 @@ export default function Home() {
       setBusy("");
     }
   }
+  async function importWitFoo() {
+    setBusy("WitFoo import");
+    setError("");
+    setNotice("");
+    try {
+      const cursor = await call<{ next_offset: number }>(
+        "/api/datasets/witfoo/status",
+      );
+      const result = await call<{
+        imported: number;
+        skipped: number;
+        items: Event[];
+      }>("/api/datasets/witfoo/import", "POST", {
+        limit: 20,
+        offset: cursor.next_offset,
+      });
+      await refresh();
+      const newest = result.items.at(-1);
+      if (newest) {
+        setSelected(newest.event_id);
+        setSelectedRecord(newest);
+        setField(null);
+        setQuery("");
+        setEvidencePage(0);
+        setEvidenceData(null);
+        setTab("evidence");
+      }
+      setNotice(
+        result.imported
+          ? `Imported ${result.imported} sanitized WitFoo SOC events into the evidence vault. The newest sample is open for raw-to-normalized inspection.`
+          : `No new events in this sample window. ${result.skipped} records were already imported or unavailable.`,
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not import the WitFoo sample.",
+      );
+    } finally {
+      setBusy("");
+    }
+  }
   async function runReplay() {
     setBusy("Replay");
     setError("");
@@ -579,7 +638,11 @@ export default function Home() {
           <div className="local-badge">
             <span className="pulse-dot" />{" "}
             {HOSTED ? "HOSTED DEMO" : "LOCAL DEMO"} <span>•</span>{" "}
-            {HOSTED ? "SYNTHETIC DATA" : "OFFLINE READY"}
+            {overview?.dataset_samples
+              ? `${overview.dataset_samples} PUBLIC SAMPLES`
+              : HOSTED
+                ? "SYNTHETIC DATA"
+                : "OFFLINE READY"}
           </div>
           <div className="sidebar-small">
             SIH 2026 <span>·</span> Log preprocessing
@@ -860,9 +923,17 @@ export default function Home() {
               <Heading
                 eyebrow="01 / INGEST"
                 title="Live ingestion"
-                description="Every generated event gets a receipt before parsing. Select a row to inspect its evidence."
+                description="Generated and imported events get a receipt before parsing. Select a row to inspect its evidence."
                 action={
                   <div className="heading-actions">
+                    <Button
+                      variant="outline"
+                      disabled={!!busy}
+                      onClick={() => void importWitFoo()}
+                    >
+                      <Download data-icon="inline-start" />
+                      Import 20 WitFoo events
+                    </Button>
                     <Button
                       variant="outline"
                       disabled={!!busy}
@@ -917,7 +988,7 @@ export default function Home() {
                     <span className="tiny-muted">AUTO REFRESH · 2.5S</span>
                   </div>
                   <CardDescription>
-                    Actual events stored by the demo backend.
+                    Import a small sample from WitFoo’s 114M-event sanitized production SOC capture. The original syslog message is stored locally with its normalized fields and dataset attribution; the full dataset is never downloaded.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="table-scroll">
@@ -1094,6 +1165,58 @@ export default function Home() {
                           </div>
                         </CardContent>
                       </Card>
+                      {selectedEvent.source_id === "witfoo_soc" &&
+                        selectedEvent.normalized.evidence?.dataset && (
+                          <Card className="panel dataset-attribution">
+                            <CardHeader>
+                              <div className="panel-title-row">
+                                <div>
+                                  <CardTitle>Dataset provenance</CardTitle>
+                                  <CardDescription>
+                                    Sanitized SOC event · Apache-2.0 dataset
+                                  </CardDescription>
+                                </div>
+                                <Badge variant="outline">WITFOO</Badge>
+                              </div>
+                            </CardHeader>
+                            <CardContent>
+                              <div>
+                                <span>Artifact</span>
+                                <code className="mono">
+                                  {selectedEvent.normalized.evidence.dataset.artifact_id}
+                                </code>
+                              </div>
+                              <div>
+                                <span>Publisher label</span>
+                                <strong>
+                                  {selectedEvent.normalized.source_label ||
+                                    "Unlabeled"}
+                                </strong>
+                              </div>
+                              <div>
+                                <span>Stream</span>
+                                <strong>
+                                  {String(
+                                    selectedEvent.normalized.source_stream ||
+                                      "—",
+                                  )}
+                                </strong>
+                              </div>
+                              <p>
+                                Machine-derived dataset label; not analyst-
+                                confirmed ground truth. Raw message is retained
+                                beside the canonical record.
+                              </p>
+                              <a
+                                href={selectedEvent.normalized.evidence.dataset.url}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                View dataset source <ArrowRight aria-hidden="true" />
+                              </a>
+                            </CardContent>
+                          </Card>
+                        )}
                       <div className="evidence-pair">
                         <Card className="panel code-card">
                           <CardHeader>

@@ -10,6 +10,9 @@ import sqlite3
 import threading
 import time
 import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +38,9 @@ PARSER_ID = "paloalto-traffic"
 BASE_VERSION = "1.4.2"
 CANDIDATE_VERSION = "1.4.3"
 PACK_FILES = ("manifest.yaml", "rules.yaml", "golden_samples.jsonl", "expected_outputs.jsonl")
+WITFOO_SOURCE = "witfoo_soc"
+WITFOO_DATASET = "witfoo/precinct6-cybersecurity-100m"
+WITFOO_DATASET_URL = "https://huggingface.co/datasets/witfoo/precinct6-cybersecurity-100m"
 LOCK = threading.RLock()
 STOP = threading.Event()
 WORKER: threading.Thread | None = None
@@ -68,6 +74,9 @@ def initialize() -> None:
           field_map TEXT NOT NULL, shape TEXT NOT NULL, drift TEXT NOT NULL DEFAULT '[]'
         );
         CREATE TABLE IF NOT EXISTS registry (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS dataset_imports (
+          artifact_id TEXT PRIMARY KEY, receipt_id TEXT NOT NULL UNIQUE, row_index INTEGER NOT NULL
+        );
         """)
         for key, value in {"active": BASE_VERSION, "rollback": "", "approved_by": "", "approved_at": ""}.items():
             db.execute("INSERT OR IGNORE INTO registry VALUES (?, ?)", (key, value))
@@ -151,7 +160,7 @@ def pack_valid(version: str) -> bool:
         return False
 
 
-def parse(raw: bytes, source: str, version: str) -> tuple[dict[str, Any], dict[str, Any], list[str], dict[str, str]]:
+def parse(raw: bytes, source: str, version: str, source_context: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any], list[str], dict[str, str]]:
     text = raw.decode("utf-8", errors="replace")
     errors: list[str] = []
     fields: dict[str, Any] = {}
@@ -223,6 +232,63 @@ def parse(raw: bytes, source: str, version: str) -> tuple[dict[str, Any], dict[s
             mapping = {k: source_value(raw, k, v) for k, v in fields.items() if k != "category"}
             mapping["event_time"] = source_value(raw, "timestamp", match["timestamp"])
             mapping["event_time"]["transform"] = "combined-log time to UTC"
+    elif source == WITFOO_SOURCE:
+        context = source_context or {}
+        try:
+            event_timestamp = context.get("event_time")
+            timestamp_source = "event_time"
+            if event_timestamp is None:
+                event_timestamp = context.get("timestamp")
+                timestamp_source = "timestamp"
+            if event_timestamp is not None:
+                if isinstance(event_timestamp, (int, float)):
+                    fields["event_time"] = datetime.fromtimestamp(float(event_timestamp), timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                else:
+                    parsed = datetime.fromisoformat(str(event_timestamp).replace("Z", "+00:00"))
+                    fields["event_time"] = parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                mapping["event_time"] = {"source_key": f"WitFoo.{timestamp_source}", "byte_start": None, "byte_end": None,
+                                         "transform": "source event time → ISO 8601 UTC" if timestamp_source == "event_time" else "artifact ingest time → ISO 8601 UTC (source event time unavailable)",
+                                         "confidence": 1.0 if timestamp_source == "event_time" else 0.85}
+            else:
+                errors.append("missing:timestamp")
+        except (OverflowError, OSError, TypeError, ValueError):
+            errors.append("invalid_timestamp")
+
+        message_type = str(context.get("message_type") or "").casefold()
+        category = "identity_activity" if any(token in message_type for token in ("auth", "logon", "login", "pam", "user")) else \
+            "network_activity" if any(token in message_type for token in ("network", "firewall", "flow", "connection", "access_log", "management")) else \
+            "system_activity" if any(token in message_type for token in ("system", "process", "service", "diagnostic", "file")) else "security_event"
+        fields["category"] = category
+        mapping["category"] = {"source_key": "WitFoo.message_type", "byte_start": None, "byte_end": None,
+                                "transform": "event type → LogProof category", "confidence": 0.9}
+
+        message_match = re.search(
+            r"(?:%[A-Z0-9_-]+-\d+-[A-Z0-9_-]+:\s*|(?:sshd|systemd|CROND|sudo|pam_unix)(?:\[[^]]+\])?:\s*|(?:<\d+>)?[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:\s+[A-Z]{2,5})?\s+\S+\s+[^:]+:\s*)(?P<message>.*)$",
+            text,
+            re.IGNORECASE,
+        )
+        action = context.get("action") or (message_match.group("message").strip() if message_match else text.strip())
+        if action:
+            fields["action"] = str(action)
+            mapping["action"] = source_value(raw, "message_sanitized", action)
+            mapping["action"]["transform"] = "extracted event message from sanitized source log"
+
+        context_fields = {"src.ip": "src_ip", "dst.ip": "dst_ip", "src.port": "src_port", "dst.port": "dst_port",
+                          "protocol": "protocol", "src.host": "src_host", "dst.host": "dst_host", "user.id": "username",
+                          "severity": "severity", "vendor_code": "vendor_code"}
+        for normalized_key, source_key in context_fields.items():
+            value = context.get(source_key)
+            if value not in (None, ""):
+                fields[normalized_key] = value
+                mapping[normalized_key] = source_value(raw, source_key, value)
+                mapping[normalized_key]["source_key"] = f"WitFoo.{source_key}"
+                if mapping[normalized_key]["byte_start"] is None:
+                    mapping[normalized_key]["transform"] = "retained from publisher's structured event context"
+        fields["source_event_type"] = context.get("message_type")
+        fields["source_stream"] = context.get("stream_name")
+        fields["source_label"] = context.get("label_binary")
+        mapping["source_label"] = {"source_key": "WitFoo.label_binary", "byte_start": None, "byte_end": None,
+                                   "transform": "publisher-provided machine-derived label; retained as context", "confidence": 1.0}
     return fields, mapping, errors, shape_of(event) if event else {"$": "str"}
 
 
@@ -243,8 +309,8 @@ def drift_for(source: str, shape: dict[str, str], version: str) -> list[str]:
     return changes
 
 
-def ingest_bytes(source: str, raw: bytes) -> dict[str, Any]:
-    if source not in SOURCES:
+def ingest_bytes(source: str, raw: bytes, source_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    if source not in SOURCES and source != WITFOO_SOURCE:
         raise HTTPException(404, "Unknown source")
     if not raw or len(raw) > 256_000:
         raise HTTPException(400, "Raw event must be 1 to 256000 bytes")
@@ -257,7 +323,7 @@ def ingest_bytes(source: str, raw: bytes) -> dict[str, Any]:
         received = now()
         version = registry()["active"] if source == "paloalto_firewall" else "1.0.0"
         try:
-            fields, mapping, errors, shape = parse(raw, source, version)
+            fields, mapping, errors, shape = parse(raw, source, version, source_context)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             fields, mapping, shape = {}, {}, {}
             errors = ["parser_unavailable" if isinstance(exc, OSError) else "parser_failure"]
@@ -273,11 +339,31 @@ def ingest_bytes(source: str, raw: bytes) -> dict[str, Any]:
                       "severity": fields.get("severity"), "src": {"ip": fields.get("src.ip"), "port": None},
                       "dst": {"ip": fields.get("dst.ip"), "port": None}, "user": {"id": fields.get("user.id")},
                       "rule": fields.get("rule")}
+        if source == WITFOO_SOURCE:
+            normalized["category"] = fields.get("category", "security_event")
+            normalized["src"] = {"ip": fields.get("src.ip"), "port": fields.get("src.port"), "host": fields.get("src.host")}
+            normalized["dst"] = {"ip": fields.get("dst.ip"), "port": fields.get("dst.port"), "host": fields.get("dst.host")}
+            normalized["user"] = {"id": fields.get("user.id")}
+            normalized["protocol"] = fields.get("protocol")
+            normalized["source_event_type"] = fields.get("source_event_type")
+            normalized["source_stream"] = fields.get("source_stream")
+            normalized["source_label"] = fields.get("source_label")
+            normalized["source_context"] = {
+                key: value for key, value in (source_context or {}).items()
+                if value not in (None, "")
+            }
         quality = {"status": status, "confidence": round(len(required) - len(missing), 2) / len(required),
                    "missing_required_fields": missing, "validation_errors": errors, "drift_detected": bool(drift)}
         normalized["evidence"] = {"raw_path": str(path.relative_to(DATA)), "sha256": digest,
                                   "parser_id": PARSER_ID if source == "paloalto_firewall" else source,
                                   "parser_version": version, "field_map": mapping}
+        if source == WITFOO_SOURCE and source_context:
+            normalized["evidence"]["dataset"] = {
+                "name": WITFOO_DATASET, "url": WITFOO_DATASET_URL, "license": "Apache-2.0",
+                "artifact_id": source_context.get("artifact_id"), "row_index": source_context.get("row_index"),
+                "organization": source_context.get("org_id"), "pipeline": source_context.get("pipeline"),
+                "label_note": "Publisher-provided machine-derived label; not analyst-confirmed ground truth.",
+            }
         normalized["quality"] = quality
         with connect() as db:
             db.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -290,7 +376,7 @@ def row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     item = {key: row[key] for key in ("event_id", "receipt_id", "source_id", "received_at", "raw_path", "sha256", "parser_version")}
     for key in ("normalized", "quality", "field_map", "shape", "drift"):
         item[key] = json.loads(row[key])
-    item["raw_format"] = SOURCES[item["source_id"]][1]
+    item["raw_format"] = "WitFoo sanitized syslog" if item["source_id"] == WITFOO_SOURCE else SOURCES[item["source_id"]][1]
     return item
 
 
@@ -327,14 +413,104 @@ def overview() -> dict[str, Any]:
     with connect() as db:
         counts = {r["quality"]: r["count"] for r in db.execute("SELECT json_extract(quality,'$.status') AS quality, count(*) AS count FROM events GROUP BY quality")}
         drifts = db.execute("SELECT count(*) FROM events WHERE drift!='[]'").fetchone()[0]
+        dataset_samples = db.execute("SELECT count(*) FROM dataset_imports").fetchone()[0]
     return {"accepted": counts.get("accepted", 0), "quarantined": counts.get("quarantined", 0),
             "drift_alerts": drifts, "sources": [{"id": key, "name": value[0], "format": value[1], "enabled": ENABLED[key], "rate": RATES[key]} for key, value in SOURCES.items()],
+            "dataset_samples": dataset_samples,
             "registry": registry(), "simulator_running": bool(WORKER and WORKER.is_alive())}
 
 
 @app.post("/api/ingest/{source_id}")
 async def ingest(source_id: str, request: Request) -> dict[str, Any]:
     return ingest_bytes(source_id, await request.body())
+
+
+@app.get("/api/datasets/witfoo/status")
+def witfoo_status() -> dict[str, Any]:
+    with connect() as db:
+        imported = db.execute("SELECT count(*) FROM dataset_imports").fetchone()[0]
+        next_row = db.execute("SELECT coalesce(max(row_index) + 1, 0) FROM dataset_imports").fetchone()[0]
+    return {"dataset": WITFOO_DATASET, "url": WITFOO_DATASET_URL, "license": "Apache-2.0",
+            "imported": imported, "next_offset": next_row}
+
+
+class WitFooImportRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=50)
+    offset: int = Field(default=0, ge=0, le=114_421_340)
+
+
+@app.post("/api/datasets/witfoo/import")
+def import_witfoo(request_body: WitFooImportRequest) -> dict[str, Any]:
+    query = urllib.parse.urlencode({"dataset": WITFOO_DATASET, "config": "signals", "split": "train",
+                                    "offset": request_body.offset, "length": request_body.limit})
+    url = f"https://datasets-server.huggingface.co/rows?{query}"
+    payload = None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "LogProof-local-demo/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                body = response.read(8_000_001)
+            if len(body) > 8_000_000:
+                raise ValueError("Hugging Face sample response exceeded the 8 MB safety limit")
+            payload = json.loads(body.decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                break
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+            if attempt == 2:
+                break
+        time.sleep(0.4 * (attempt + 1))
+
+    used_preview_fallback = False
+    if payload is None and request_body.offset == 0:
+        preview_query = urllib.parse.urlencode({"dataset": WITFOO_DATASET, "config": "signals", "split": "train"})
+        preview_url = f"https://datasets-server.huggingface.co/first-rows?{preview_query}"
+        try:
+            req = urllib.request.Request(preview_url, headers={"User-Agent": "LogProof-local-demo/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                body = response.read(8_000_001)
+            if len(body) > 8_000_000:
+                raise ValueError("Hugging Face preview response exceeded the 8 MB safety limit")
+            payload = json.loads(body.decode("utf-8"))
+            payload["rows"] = payload.get("rows", [])[:request_body.limit]
+            used_preview_fallback = True
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+    if payload is None:
+        raise HTTPException(502, "Could not reach the public Hugging Face dataset preview. Retry when online.") from last_error
+
+    imported: list[dict[str, Any]] = []
+    skipped = 0
+    for item in payload.get("rows", []):
+        row = item.get("row", {})
+        message = row.get("message_sanitized")
+        artifact_id = row.get("artifact_id")
+        if not isinstance(message, str) or not message.strip() or not isinstance(artifact_id, str):
+            skipped += 1
+            continue
+        with connect() as db:
+            existing = db.execute("SELECT receipt_id FROM dataset_imports WHERE artifact_id=?", (artifact_id,)).fetchone()
+        if existing:
+            skipped += 1
+            continue
+        context = {key: row.get(key) for key in (
+            "timestamp", "event_time", "artifact_id", "org_id", "message_type", "stream_name", "pipeline",
+            "src_ip", "dst_ip", "src_port", "dst_port", "protocol", "src_host", "dst_host", "username",
+            "action", "severity", "vendor_code", "label_binary", "label_confidence", "attack_techniques", "attack_tactics",
+        )}
+        context["row_index"] = item.get("row_idx", request_body.offset + len(imported))
+        event = ingest_bytes(WITFOO_SOURCE, message.encode("utf-8"), context)
+        with LOCK, connect() as db:
+            db.execute("INSERT OR IGNORE INTO dataset_imports VALUES (?,?,?)",
+                       (artifact_id, event["receipt_id"], int(context["row_index"])))
+        imported.append(event)
+    return {"dataset": WITFOO_DATASET, "requested": request_body.limit, "offset": request_body.offset,
+            "preview_fallback": used_preview_fallback,
+            "imported": len(imported), "skipped": skipped, "items": imported}
 
 
 @app.get("/api/events")
@@ -361,6 +537,8 @@ def events_page(limit: int = 20, offset: int = 0, q: str = "") -> dict[str, Any]
             or normalized_search
             in re.sub(r"[^a-z0-9]", "", source_id.casefold())
         ]
+        if any(term in search.casefold() for term in ("witfoo", "dataset", "soc sample")):
+            source_ids.append(WITFOO_SOURCE)
         search_clauses = ["receipt_id LIKE ?"]
         params.append(f"%{search}%")
         if source_ids:
@@ -425,6 +603,7 @@ def scenario(scenario_id: str) -> dict[str, Any]:
             WORKER.join(timeout=3)
         with LOCK, connect() as db:
             db.execute("DELETE FROM events")
+            db.execute("DELETE FROM dataset_imports")
             for path in RAW.glob("rcpt_*.bin"):
                 path.unlink()
         set_registry(active=BASE_VERSION, rollback="", approved_by="", approved_at="")

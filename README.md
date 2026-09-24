@@ -1,6 +1,6 @@
 # LogProof
 
-Local-first Smart India Hackathon 2026 demonstration for log preprocessing assurance. The working proof paths are **mapping failure → preserved evidence → replay-gated parser promotion**. All sample logs are generated on the presenter laptop.
+Local-first Smart India Hackathon 2026 demonstration for log preprocessing assurance. The working proof paths are **mapping failure → preserved evidence → replay-gated parser promotion**. Generated logs are available offline, with an optional small sample import from the published WitFoo Precinct6 SOC dataset.
 
 ## Run locally on Windows 11
 
@@ -24,6 +24,12 @@ npm run dev
 ```
 
 Open **http://localhost:3000**. The API is at **http://127.0.0.1:8000**. The backend seeds one baseline event from each of five source families on first launch. Data persists under `data/` until reset.
+
+## Import a WitFoo sample
+
+In **Live ingestion**, select **Import 20 WitFoo events**. The backend requests one bounded page from the public [WitFoo Precinct6 Cybersecurity dataset](https://huggingface.co/datasets/witfoo/precinct6-cybersecurity-100m) through Hugging Face's dataset viewer, then stores each sanitized source message in the local raw vault before normalizing it. It does not download the 114-million-event dataset. Imported rows retain their dataset artifact ID, stream, organization token, source label, and available ATT&CK context. The Evidence explorer opens the newest record to show the raw syslog, canonical fields, source mapping, and dataset attribution. Publisher labels are kept as machine-derived context, not treated as analyst-confirmed ground truth.
+
+This optional import needs an internet connection. Once fetched, imported evidence is stored under the same local `data/` directory as the generated events and can be inspected offline. The dataset card lists the Apache-2.0 license. The importer defaults to 20 records and accepts at most 50 per API request; repeat imports continue from the next stored dataset row.
 
 For Linux or macOS, use the same commands in separate terminals. Set `LOGPROOF_DATA` to a local directory if you want a different storage location.
 
@@ -56,10 +62,11 @@ The **Why LogProof** section explains the purpose of the prototype: make the con
 ## Two-to-four-minute jury walkthrough
 
 1. **Overview → Start guided demo.** Show five local source formats and live receipts. Each event is saved to the raw vault before parsing.
-2. **Drift watch → Trigger format change.** The firewall's `rule` changes from a string to an object. The active v1.4.2 parser cannot map it, so the event is quarantined and its type change is shown.
-3. **Evidence explorer.** Select that receipt. Show its exact raw text, SHA-256 integrity check, parser version, and field-to-source mapping. Clicking a mapped field highlights its source in the raw view.
-4. **Replay lab → Run replay.** The old and candidate parsers process identical golden and stored samples. Show rule mapping restoration, required-field coverage, golden results, and regression count.
-5. Enter the presenter's name and choose **Approve & promote**. The active parser becomes v1.4.3; v1.4.2 remains the rollback target. The registry shows each local pack checksum. Use **Roll back parser** to demonstrate recovery.
+2. **Live ingestion → Import 20 WitFoo events** (optional, requires internet). Open the newest record in Evidence explorer and show the sanitized source syslog transformed into the canonical event, with field-level source mapping and its dataset artifact ID.
+3. **Drift watch → Trigger format change.** The firewall's `rule` changes from a string to an object. The active v1.4.2 parser cannot map it, so the event is quarantined and its type change is shown.
+4. **Evidence explorer.** Select a receipt. Show its exact raw text, SHA-256 integrity check, parser version, and field-to-source mapping. Clicking a mapped field highlights its source in the raw view.
+5. **Replay lab → Run replay.** The old and candidate parsers process identical golden and stored samples. Show rule mapping restoration, required-field coverage, golden results, and regression count.
+6. Enter the presenter's name and choose **Approve & promote**. The active parser becomes v1.4.3; v1.4.2 remains the rollback target. The registry shows each local pack checksum. Use **Roll back parser** to demonstrate recovery.
 
 Use **Reset demo** in the footer, or run `scripts/reset_demo.ps1`, to clear local records and reseed the five baseline events. Reset also returns the active firewall parser to v1.4.2.
 
@@ -79,7 +86,7 @@ flowchart LR
   J -->|pass and human approval| K[Promote candidate\nretain rollback]
 ```
 
-The collector receives raw bytes at `POST /api/ingest/{source_id}`. It assigns a receipt ID, writes those bytes to `data/raw/`, records their SHA-256, and only then invokes a deterministic parser. Normalized events, quality, parser version, shape, and field mapping are kept in SQLite. `GET /api/evidence/{receipt_id}` rereads the original file and verifies its hash. The hash proves integrity of ingested bytes relative to this local vault; it does not prove the source device's identity.
+The collector receives raw bytes at `POST /api/ingest/{source_id}`. It assigns a receipt ID, writes those bytes to `data/raw/`, records their SHA-256, and only then invokes a deterministic parser. `POST /api/datasets/witfoo/import` obtains a bounded source page and passes each original sanitized log message through that same vault and evidence path; `GET /api/datasets/witfoo/status` reports the stored sample count and next row. Normalized events, quality, parser version, shape, and field mapping are kept in SQLite. `GET /api/evidence/{receipt_id}` rereads the original file and verifies its hash. The hash proves integrity of ingested bytes relative to this local vault; it does not prove the source device's identity.
 
 Firewall parser packs live under `parsers/paloalto-traffic/{version}/`. Each has `manifest.yaml`, `rules.yaml`, `golden_samples.jsonl`, `expected_outputs.jsonl`, and `checksum.sha256`. The YAML files use JSON syntax, which is a valid YAML subset and needs no extra parser dependency. The backend loads the rule mapping from the selected pack, computes pack checksums, and verifies the candidate checksum before promotion. The checksums are local integrity checks, not digital signatures.
 
@@ -98,7 +105,7 @@ The smoke check uses temporary storage, so it does not change demo data. It chec
 
 ## Implemented and future work
 
-Implemented: five local source generators; raw evidence vault; SQLite event metadata; deterministic parsing; firewall shape drift and quarantine; field-level mapping; equal-corpus replay; golden checks; named human approval; versioned parser packs with local checksums; rollback; responsive console and one-click reset.
+Implemented: five local source generators; bounded optional import from the public WitFoo SOC dataset; raw evidence vault; SQLite event metadata; deterministic parsing; firewall shape drift and quarantine; field-level mapping; equal-corpus replay; golden checks; named human approval; versioned parser packs with local checksums; rollback; responsive console and one-click reset.
 
 Future: actual syslog UDP/TCP listeners, streaming backpressure, configurable parser rules loaded from manifests, Ed25519-signed parser packs, source authentication, broader schema baselines, complete OCSF mapping, multiuser approvals, and performance benchmarking. UI figures are computed from the running demo or explicitly marked as measured. This is a prototype, not a production SIEM.
 
