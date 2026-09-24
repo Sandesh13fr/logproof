@@ -1,0 +1,2 @@
+{"timestamp":"2026-09-24T12:34:56Z","action":"allow","src_ip":"10.24.8.11","dst_ip":"172.16.4.20","rule":"allow-web","severity":2}
+{"timestamp":"2026-09-24T12:34:56Z","action":"allow","src_ip":"10.24.8.12","dst_ip":"172.16.4.20","rule":{"name":"allow-web","revision":2},"severity":2}

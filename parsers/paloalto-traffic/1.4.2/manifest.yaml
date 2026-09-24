@@ -1,0 +1,8 @@
+{
+  "parser_id": "paloalto-traffic",
+  "version": "1.4.2",
+  "source_family": "paloalto_firewall",
+  "description": "Baseline firewall parser; expects rule as a string.",
+  "required_fields": ["event_time", "action", "rule"],
+  "previous_version": null
+}

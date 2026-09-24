@@ -1,0 +1,8 @@
+{
+  "parser_id": "paloalto-traffic",
+  "version": "1.4.3",
+  "source_family": "paloalto_firewall",
+  "description": "Candidate parser; accepts string rule or rule.name object mapping.",
+  "required_fields": ["event_time", "action", "rule"],
+  "previous_version": "1.4.2"
+}
