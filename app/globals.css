@@ -1236,6 +1236,44 @@ textarea:focus-visible {
 .replay-metrics {
   margin-bottom: 18px;
 }
+.replay-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.evaluation-panel {
+  margin-bottom: 16px;
+}
+.evaluation-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 0 13px;
+  padding: 10px 12px;
+  border: 1px solid #f3dfcf;
+  border-radius: 8px;
+  background: #fff9f4;
+  color: #79533e;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.evaluation-scope svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #df6a2e;
+}
+.evaluation-version {
+  display: block;
+  margin-top: 3px;
+  color: #8a98a8;
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+}
+.evaluation-metrics {
+  margin-top: 16px;
+}
 .bad-text {
   color: #c8433a;
 }

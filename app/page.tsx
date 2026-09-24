@@ -145,6 +145,39 @@ type Replay = {
   }[];
   promotion_ready: boolean;
 };
+type EvaluationScores = {
+  tp: number;
+  fp: number;
+  fn: number;
+  quarantine_tp: number;
+  quarantine_fp: number;
+  quarantine_fn: number;
+  passed: number;
+  cases: number;
+  fields_expected: number;
+  field_precision: number;
+  field_recall: number;
+  field_f1: number;
+  quarantine_precision: number;
+  quarantine_recall: number;
+  quarantine_f1: number;
+  fixture_pass_rate: number;
+};
+type ParserEvaluation = {
+  evaluation_type: string;
+  scope_note: string;
+  active_firewall_parser: string;
+  source_count: number;
+  case_count: number;
+  field_count: number;
+  duration_ms: number;
+  overall: EvaluationScores;
+  sources: (EvaluationScores & {
+    source_id: string;
+    display_name: string;
+    parser_version: string;
+  })[];
+};
 type Registry = {
   packs: {
     parser_id: string;
@@ -426,6 +459,7 @@ export default function Home() {
   const [evidence, setEvidence] = useState<Evidence | null>(null);
   const [field, setField] = useState<string | null>(null);
   const [replay, setReplay] = useState<Replay | null>(null);
+  const [parserEvaluation, setParserEvaluation] = useState<ParserEvaluation | null>(null);
   const [approval, setApproval] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -691,6 +725,18 @@ export default function Home() {
       setTab("replay");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Replay failed.");
+    } finally {
+      setBusy("");
+    }
+  }
+  async function runParserEvaluation() {
+    setBusy("Evaluation");
+    setError("");
+    try {
+      setParserEvaluation(await call<ParserEvaluation>("/api/parser/evaluation"));
+      setTab("replay");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Parser evaluation failed.");
     } finally {
       setBusy("");
     }
@@ -1749,14 +1795,71 @@ export default function Home() {
               <Heading
                 eyebrow="05 / PROVE"
                 title="Replay lab"
-                description="Run the same stored corpus through the approved and candidate parsers."
+                description="Compare parser versions, then check the demo parsers against a small labeled fixture set."
                 action={
-                  <Button disabled={!!busy} onClick={() => void runReplay()}>
-                    <Play data-icon="inline-start" />
-                    {busy === "Replay" ? "Running…" : "Run replay"}
-                  </Button>
+                  <div className="replay-actions">
+                    <Button variant="outline" disabled={!!busy} onClick={() => void runParserEvaluation()}>
+                      <ShieldCheck data-icon="inline-start" />
+                      {busy === "Evaluation" ? "Evaluating…" : "Evaluate parsers"}
+                    </Button>
+                    <Button disabled={!!busy} onClick={() => void runReplay()}>
+                      <Play data-icon="inline-start" />
+                      {busy === "Replay" ? "Running…" : "Run firewall replay"}
+                    </Button>
+                  </div>
                 }
               />
+              {parserEvaluation && (
+                <>
+                  <Card className="panel evaluation-panel">
+                    <CardHeader>
+                      <CardTitle>Parser quality baseline</CardTitle>
+                      <CardDescription>
+                        {parserEvaluation.case_count} labeled cases across {parserEvaluation.source_count} demo parsers · {parserEvaluation.field_count} expected field values · {parserEvaluation.duration_ms} ms locally
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="evaluation-scope" role="note">
+                        <CircleAlert aria-hidden="true" />
+                        {parserEvaluation.scope_note} These curated examples are a regression baseline, not production accuracy.
+                      </div>
+                      <div className="table-scroll">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Source parser</TableHead>
+                              <TableHead>Fixtures passed</TableHead>
+                              <TableHead>Field P / R / F1</TableHead>
+                              <TableHead>Quarantine P / R / F1</TableHead>
+                              <TableHead>Field TP / FP / FN</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {parserEvaluation.sources.map((source) => (
+                              <TableRow key={source.source_id}>
+                                <TableCell>
+                                  <strong>{source.display_name}</strong>
+                                  <span className="evaluation-version">v{source.parser_version}</span>
+                                </TableCell>
+                                <TableCell>{source.passed}/{source.cases} · {(source.fixture_pass_rate * 100).toFixed(0)}%</TableCell>
+                                <TableCell>{(source.field_precision * 100).toFixed(0)} / {(source.field_recall * 100).toFixed(0)} / {(source.field_f1 * 100).toFixed(0)}%</TableCell>
+                                <TableCell>{(source.quarantine_precision * 100).toFixed(0)} / {(source.quarantine_recall * 100).toFixed(0)} / {(source.quarantine_f1 * 100).toFixed(0)}%</TableCell>
+                                <TableCell>{source.tp} / {source.fp} / {source.fn}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <div className="metric-grid replay-metrics evaluation-metrics">
+                    <Kpi icon={CheckCircle2} label="Fixture pass rate" value={`${(parserEvaluation.overall.fixture_pass_rate * 100).toFixed(0)}%`} sub={`${parserEvaluation.overall.passed}/${parserEvaluation.overall.cases} expected outcomes`} />
+                    <Kpi icon={Fingerprint} label="Field F1" value={`${(parserEvaluation.overall.field_f1 * 100).toFixed(0)}%`} sub={`${parserEvaluation.overall.fields_expected} labeled field values`} />
+                    <Kpi icon={ShieldX} label="Quarantine recall" value={`${(parserEvaluation.overall.quarantine_recall * 100).toFixed(0)}%`} sub={`${parserEvaluation.overall.quarantine_tp} malformed fixtures caught`} />
+                    <Kpi icon={Clock3} label="Evaluation time" value={`${parserEvaluation.duration_ms} ms`} sub="Local fixture run" />
+                  </div>
+                </>
+              )}
               <div className="replay-flow">
                 <div>
                   <span>BASELINE PARSER</span>

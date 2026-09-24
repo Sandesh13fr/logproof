@@ -91,7 +91,13 @@ npm run lint
 npm run build
 ```
 
-The smoke check uses a temporary database and verifies the ten source samples, CSV and LEEF parsing, LEEF 1.0 tabs and a LEEF 2.0 hex delimiter, mixed-source NDJSON import/export, raw-hash checks, malformed-input quarantine, firewall drift, parser replay, approval, and rollback.
+The smoke check uses a temporary database and verifies the ten source samples, CSV and LEEF parsing, LEEF 1.0 tabs and a LEEF 2.0 hex delimiter, mixed-source NDJSON import/export, raw-hash checks, malformed-input quarantine, firewall drift, parser replay, approval, rollback, and the labeled parser-evaluation fixtures.
+
+### Parser evaluation
+
+In **Replay lab**, choose **Evaluate parsers** to compare the ten demo parser families against 20 hand-authored fixtures: one valid and one malformed case per source. The local, read-only endpoint is `GET /api/parser/evaluation`; fixture definitions live in `backend/fixtures/parser_evaluation.jsonl`.
+
+The report calculates exact normalized-field precision, recall and F1 from labeled key/value pairs; quarantine precision, recall and F1 from valid/malformed fixture labels; exact fixture pass rate; expected field-value counts; and local run time. The firewall result uses its currently active parser version; the other demo parsers use version `1.0.0`. The fixtures are synthetic regression examples, so these scores do not estimate production accuracy, real-world generalization, parser coverage, or ministry readiness. Add independently labeled examples from representative production sources before using the metrics to compare parser quality beyond the demo.
 
 The Docker Compose path was built and run with Docker Desktop using host ports 3100/8100 and a temporary data directory. The web page returned HTTP 200; the API health check, ten-source overview, CORS, and raw ingestion plus evidence-hash verification for RFC 5424, CEF, and Windows Event XML passed.
 
@@ -122,6 +128,7 @@ The app images include parsers, application code, and runtime dependencies. The 
 - Raw event storage before parsing, receipt IDs, recorded SHA-256 hashes, and field-to-source mappings.
 - Representative parsers for JSON, CSV, LEEF, Cisco-style Syslog, RFC 5424, CEF, NGINX combined logs, and Windows Event XML.
 - Validation and quarantine for malformed or incomplete records; firewall shape-drift detection.
+- A read-only evaluation endpoint and Replay lab view with per-source field precision/recall/F1, malformed-event quarantine precision/recall/F1, fixture pass rate, and local execution time across curated synthetic cases.
 - A versioned firewall parser example with golden samples, equal-corpus replay, named approval, and rollback.
 - A bounded optional WitFoo dataset import with dataset attribution.
 - Dockerfiles, Compose configuration, and an offline image bundle/export workflow for running the two application services locally or transferring their images without registry pulls.

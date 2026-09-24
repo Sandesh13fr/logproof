@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 with tempfile.TemporaryDirectory(prefix="logproof-smoke-") as directory:
     os.environ["LOGPROOF_DATA"] = directory
-    from backend.main import Approval, approve, events, evidence, export_events, import_ndjson, ingest_bytes, overview, pack_valid, replay_result, rollback, sample, scenario
+    from backend.main import Approval, approve, events, evidence, export_events, import_ndjson, ingest_bytes, overview, pack_valid, parser_evaluation_result, replay_result, rollback, sample, scenario
 
     scenario("reset")
     assert overview()["accepted"] == 10
@@ -43,6 +43,14 @@ with tempfile.TemporaryDirectory(prefix="logproof-smoke-") as directory:
     replay = replay_result()
     assert replay["golden_passed"] == replay["golden_total"] == 2
     assert replay["promotion_ready"] and replay["regressions"] == 0
+    evaluation_event_count = len(events())
+    evaluation = parser_evaluation_result()
+    assert evaluation["source_count"] == 10 and evaluation["case_count"] == 20
+    assert evaluation["overall"]["field_f1"] == 1.0
+    assert evaluation["overall"]["quarantine_recall"] == 1.0
+    assert evaluation["overall"]["fixture_pass_rate"] == 1.0
+    assert all(source["cases"] == 2 and source["fixture_pass_rate"] == 1.0 for source in evaluation["sources"])
+    assert len(events()) == evaluation_event_count
     assert approve(Approval(approved_by="Smoke operator"))["state"]["active"] == "1.4.3"
     assert rollback()["state"]["active"] == "1.4.2"
     malformed = scenario("malformed")["events"][0]
@@ -76,4 +84,4 @@ with tempfile.TemporaryDirectory(prefix="logproof-smoke-") as directory:
     exported = asyncio.run(read_export(export_events())).splitlines()
     assert all(isinstance(json.loads(line), dict) for line in exported)
     assert len(exported) == overview()["accepted"] + overview()["quarantined"]
-    print("LogProof smoke check passed: 10 source families, CSV, LEEF, UTF-8/base64 NDJSON import/export round trip, quarantine, evidence, replay, promotion, rollback")
+    print("LogProof smoke check passed: 10 source families, 20 parser evaluation fixtures, CSV, LEEF, UTF-8/base64 NDJSON import/export round trip, quarantine, evidence, replay, promotion, rollback")

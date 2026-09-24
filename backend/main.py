@@ -566,6 +566,99 @@ def parse(raw: bytes, source: str, version: str, source_context: dict[str, Any] 
     return fields, mapping, errors, shape_of(event) if event else {"$": "str"}
 
 
+def parser_evaluation_result() -> dict[str, Any]:
+    """Evaluate parsers against hand-authored local fixtures without storing events."""
+    started = time.perf_counter()
+    fixture_path = ROOT / "backend" / "fixtures" / "parser_evaluation.jsonl"
+    fixtures = [json.loads(line) for line in fixture_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    active_firewall_version = registry()["active"]
+    required_fields = {
+        source: ["event_time", "action"] + (["rule"] if source == "paloalto_firewall" else [])
+        for source in SOURCES
+    }
+    per_source: dict[str, dict[str, Any]] = {}
+    totals = {key: 0 for key in ("tp", "fp", "fn", "quarantine_tp", "quarantine_fp", "quarantine_fn", "passed", "cases", "fields_expected")}
+
+    def fresh_scores() -> dict[str, int]:
+        return {key: 0 for key in ("tp", "fp", "fn", "quarantine_tp", "quarantine_fp", "quarantine_fn", "passed", "cases", "fields_expected")}
+
+    def ratio(numerator: int, denominator: int) -> float:
+        return round(numerator / denominator, 4) if denominator else 1.0
+
+    for fixture in fixtures:
+        source = fixture["source_id"]
+        scores = per_source.setdefault(source, fresh_scores())
+        version = active_firewall_version if source == "paloalto_firewall" else "1.0.0"
+        expected = fixture.get("expected_fields", {})
+        ignored = set(fixture.get("ignored_fields", []))
+        expected = {key: value for key, value in expected.items() if key not in ignored}
+        actual_fields, _, errors, _ = parse(fixture["raw"].encode("utf-8"), source, version)
+        actual = {key: value for key, value in actual_fields.items() if key not in ignored and value is not None}
+        expected_quarantine = bool(fixture["expected_quarantine"])
+        missing = [key for key in required_fields[source] if key not in actual_fields]
+        predicted_quarantine = bool(errors or missing)
+        case_passed = predicted_quarantine == expected_quarantine
+
+        if expected_quarantine:
+            if predicted_quarantine:
+                scores["quarantine_tp"] += 1
+            else:
+                scores["quarantine_fn"] += 1
+        elif predicted_quarantine:
+            scores["quarantine_fp"] += 1
+        for key, expected_value in expected.items():
+            scores["fields_expected"] += 1
+            if key in actual and actual[key] == expected_value:
+                scores["tp"] += 1
+            else:
+                scores["fn"] += 1
+                case_passed = False
+                if key in actual:
+                    scores["fp"] += 1
+        for key in actual.keys() - expected.keys():
+            scores["fp"] += 1
+            case_passed = False
+        scores["cases"] += 1
+        scores["passed"] += int(case_passed)
+
+    for source, scores in per_source.items():
+        for key in totals:
+            totals[key] += scores[key]
+
+    def metrics(scores: dict[str, int]) -> dict[str, Any]:
+        precision = ratio(scores["tp"], scores["tp"] + scores["fp"])
+        recall = ratio(scores["tp"], scores["tp"] + scores["fn"])
+        quarantine_precision = ratio(scores["quarantine_tp"], scores["quarantine_tp"] + scores["quarantine_fp"])
+        quarantine_recall = ratio(scores["quarantine_tp"], scores["quarantine_tp"] + scores["quarantine_fn"])
+        return {
+            **scores,
+            "field_precision": precision,
+            "field_recall": recall,
+            "field_f1": ratio(2 * precision * recall, precision + recall),
+            "quarantine_precision": quarantine_precision,
+            "quarantine_recall": quarantine_recall,
+            "quarantine_f1": ratio(2 * quarantine_precision * quarantine_recall, quarantine_precision + quarantine_recall),
+            "fixture_pass_rate": ratio(scores["passed"], scores["cases"]),
+        }
+
+    return {
+        "evaluation_type": "curated_synthetic_golden_fixtures",
+        "scope_note": "Fixture scores are deterministic checks of these examples, not estimates of production accuracy or source coverage.",
+        "active_firewall_parser": active_firewall_version,
+        "source_count": len(per_source),
+        "case_count": totals["cases"],
+        "field_count": totals["fields_expected"],
+        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+        "overall": metrics(totals),
+        "sources": [
+            {"source_id": source, "display_name": SOURCES[source][0],
+             "parser_version": active_firewall_version if source == "paloalto_firewall" else "1.0.0",
+             **metrics(scores)}
+            for source, scores in per_source.items()
+        ],
+    }
+
+
 def baseline_shape() -> dict[str, str]:
     return shape_of({"timestamp": "", "action": "", "src_ip": "", "dst_ip": "", "rule": "", "severity": 1})
 
@@ -1103,6 +1196,11 @@ def parser_registry() -> dict[str, Any]:
         checksum = pack_checksum(version)
         packs.append({**manifest, "checksum": checksum, "checksum_valid": pack_valid(version), "status": "active" if state["active"] == version else "candidate" if version == CANDIDATE_VERSION and state["active"] != version else "rollback"})
     return {"packs": packs, "state": state}
+
+
+@app.get("/api/parser/evaluation")
+def parser_evaluation() -> dict[str, Any]:
+    return parser_evaluation_result()
 
 
 class Approval(BaseModel):
