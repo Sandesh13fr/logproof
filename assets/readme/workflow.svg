@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="364" viewBox="0 0 1200 364" role="img" aria-labelledby="title desc">
+  <title id="title">LogProof prototype workflow</title>
+  <desc id="desc">Sample or pasted log formats are stored with receipts before parsing, mapped to a common event shape, checked for parsing quality and drift, then tested with a parser replay gate.</desc>
+  <rect width="1200" height="364" rx="16" fill="#ffffff" stroke="#e4e9ef" stroke-width="2"/>
+  <text x="40" y="43" fill="#718093" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="700" letter-spacing="1.5">THE PROTOTYPE PATH</text>
+  <text x="40" y="76" fill="#192637" font-family="Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif" font-size="25" font-weight="700">From source bytes to a reviewable parser decision</text>
+
+  <g font-family="Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif">
+    <g transform="translate(38 105)">
+      <rect width="205" height="192" rx="9" fill="#f7f8fa" stroke="#dce3e9" stroke-width="2"/>
+      <text x="17" y="31" fill="#ed5726" font-size="13" font-weight="800">01 / INPUT</text>
+      <text x="17" y="60" fill="#192637" font-size="20" font-weight="700">Different formats</text>
+      <text x="17" y="91" fill="#536476" font-size="16">JSON · Syslog</text>
+      <text x="17" y="116" fill="#536476" font-size="16">CEF · Windows XML</text>
+      <text x="17" y="141" fill="#536476" font-size="16">NGINX · WitFoo sample</text>
+      <text x="17" y="174" fill="#718093" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">simulated, pasted, imported</text>
+    </g>
+    <g transform="translate(276 105)">
+      <rect width="205" height="192" rx="9" fill="#f7f8fa" stroke="#dce3e9" stroke-width="2"/>
+      <text x="17" y="31" fill="#ed5726" font-size="13" font-weight="800">02 / PRESERVE</text>
+      <text x="17" y="60" fill="#192637" font-size="20" font-weight="700">Save first</text>
+      <text x="17" y="94" fill="#536476" font-size="16">Keep the raw record</text>
+      <text x="17" y="119" fill="#536476" font-size="16">Assign a receipt ID</text>
+      <text x="17" y="144" fill="#536476" font-size="16">Record SHA-256</text>
+      <text x="17" y="174" fill="#718093" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">byte integrity check</text>
+    </g>
+    <g transform="translate(514 105)">
+      <rect width="205" height="192" rx="9" fill="#f7f8fa" stroke="#dce3e9" stroke-width="2"/>
+      <text x="17" y="31" fill="#ed5726" font-size="13" font-weight="800">03 / EXPLAIN</text>
+      <text x="17" y="60" fill="#192637" font-size="20" font-weight="700">Parse and map</text>
+      <text x="17" y="94" fill="#536476" font-size="16">Extract source fields</text>
+      <text x="17" y="119" fill="#536476" font-size="16">Normalize key values</text>
+      <text x="17" y="144" fill="#536476" font-size="16">Link fields to source</text>
+      <text x="17" y="174" fill="#718093" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">LogProof schema v1.0</text>
+    </g>
+    <g transform="translate(752 105)">
+      <rect width="205" height="192" rx="9" fill="#f7f8fa" stroke="#dce3e9" stroke-width="2"/>
+      <text x="17" y="31" fill="#ed5726" font-size="13" font-weight="800">04 / CHECK</text>
+      <text x="17" y="60" fill="#192637" font-size="20" font-weight="700">Validate changes</text>
+      <text x="17" y="94" fill="#536476" font-size="16">Accept valid parses</text>
+      <text x="17" y="119" fill="#536476" font-size="16">Quarantine failures</text>
+      <text x="17" y="144" fill="#536476" font-size="16">Flag firewall shape drift</text>
+      <text x="17" y="174" fill="#718093" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">source samples are bounded</text>
+    </g>
+    <g transform="translate(990 105)">
+      <rect width="172" height="192" rx="9" fill="#fff7f2" stroke="#edc4b3" stroke-width="2"/>
+      <text x="17" y="31" fill="#bf4219" font-size="13" font-weight="800">05 / REPLAY</text>
+      <text x="17" y="60" fill="#192637" font-size="20" font-weight="700">Review parser</text>
+      <text x="17" y="94" fill="#536476" font-size="16">Replay same inputs</text>
+      <text x="17" y="119" fill="#536476" font-size="16">Check golden cases</text>
+      <text x="17" y="144" fill="#536476" font-size="16">Approve or roll back</text>
+      <text x="17" y="174" fill="#bf4219" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">firewall parser demo</text>
+    </g>
+  </g>
+  <g fill="none" stroke="#ed5726" stroke-linecap="round" stroke-linejoin="round" stroke-width="3">
+    <path d="M249 201h20m-7-7 7 7-7 7"/><path d="M487 201h20m-7-7 7 7-7 7"/>
+    <path d="M725 201h20m-7-7 7 7-7 7"/><path d="M963 201h20m-7-7 7 7-7 7"/>
+  </g>
+  <text x="40" y="333" fill="#718093" font-family="Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif" font-size="15">Prototype boundary: no production listeners, complete OCSF mapping, SIEM export, or measured throughput.</text>
+</svg>

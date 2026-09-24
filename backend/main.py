@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import csv
+import base64
+import binascii
+import io
 import json
 import os
 import re
@@ -13,6 +17,7 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +25,7 @@ from typing import Any, Iterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,10 +36,18 @@ RAW.mkdir(parents=True, exist_ok=True)
 SOURCES = {
     "paloalto_firewall": ("Firewall", "JSON"),
     "cisco_router": ("Cisco router", "Syslog"),
+    "syslog_rfc5424": ("Syslog event", "Syslog · RFC 5424"),
+    "cef_security": ("CEF security event", "CEF · ArcSight format"),
     "nginx_access": ("NGINX access", "Combined log"),
     "windows_security": ("Windows security", "JSON"),
+    "windows_event_xml": ("Windows Event", "Windows Event XML"),
     "json_application": ("Application", "JSON"),
+    "csv_network": ("Network flow", "CSV"),
+    "leef_security": ("Security device", "LEEF"),
 }
+MAX_EVENT_BYTES = 256_000
+MAX_BATCH_BYTES = 2_000_000
+MAX_BATCH_EVENTS = 100
 PARSER_ID = "paloalto-traffic"
 BASE_VERSION = "1.4.2"
 CANDIDATE_VERSION = "1.4.3"
@@ -132,6 +146,10 @@ def source_value(raw: bytes, key: str, value: Any) -> dict[str, Any]:
     needle = json.dumps(key).encode("utf-8")
     start = raw.find(needle)
     if start < 0:
+        start = raw.find(key.encode("utf-8"))
+        if start >= 0:
+            needle = key.encode("utf-8")
+    if start < 0:
         needle = str(value).encode("utf-8")
         start = raw.find(needle)
     end = start + len(needle) if start >= 0 else None
@@ -166,7 +184,129 @@ def parse(raw: bytes, source: str, version: str, source_context: dict[str, Any] 
     fields: dict[str, Any] = {}
     mapping: dict[str, Any] = {}
     event: dict[str, Any] = {}
-    if source in ("paloalto_firewall", "windows_security", "json_application"):
+    if source == "csv_network":
+        try:
+            reader = csv.DictReader(io.StringIO(text, newline=""))
+            rows = list(reader)
+            if not reader.fieldnames or len(rows) != 1:
+                raise ValueError("CSV event must contain a header and exactly one data row")
+            event = {str(key or "").strip(): value for key, value in rows[0].items() if key}
+            aliases = {re.sub(r"[^a-z0-9]", "", key.casefold()): key for key in event}
+            def csv_value(*names: str) -> tuple[str | None, Any]:
+                for name in names:
+                    source_key = aliases.get(re.sub(r"[^a-z0-9]", "", name.casefold()))
+                    if source_key is not None and event[source_key] not in (None, ""):
+                        return source_key, event[source_key]
+                return None, None
+            for output, candidates in {
+                "event_time": ("timestamp", "event_time", "time", "starttime"),
+                "action": ("action", "event", "message", "protocol"),
+                "src.ip": ("src_ip", "src", "source_ip", "source"),
+                "dst.ip": ("dst_ip", "dst", "destination_ip", "destination"),
+                "src.port": ("src_port", "source_port"), "dst.port": ("dst_port", "destination_port"),
+                "protocol": ("protocol", "proto"), "severity": ("severity", "sev"),
+            }.items():
+                source_key, value = csv_value(*candidates)
+                if source_key is None:
+                    continue
+                if output in ("src.port", "dst.port", "severity"):
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        errors.append(f"invalid_type:{source_key}")
+                        continue
+                if output == "event_time":
+                    try:
+                        value = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                    except (TypeError, ValueError):
+                        errors.append("invalid_timestamp_pattern")
+                        continue
+                fields[output] = value
+                mapping[output] = source_value(raw, source_key, value)
+                if output == "event_time":
+                    mapping[output]["transform"] = "CSV timestamp normalized to UTC"
+            fields["category"] = "network_activity"
+        except (csv.Error, ValueError):
+            errors.append("malformed_csv_event")
+    elif source == "leef_security":
+        leef_start = text.find("LEEF:")
+        text = text[leef_start:] if leef_start >= 0 else text
+        header_version = text[5:].split("|", 1)[0] if text.startswith("LEEF:") else ""
+        version_number = header_version.split(".", 1)[0]
+        maxsplit = 6 if version_number == "2" else 5
+        parts = re.split(r"(?<!\\)\|", text, maxsplit=maxsplit)
+        expected_parts = 7 if version_number == "2" else 6
+        if not text.startswith("LEEF:") or len(parts) != expected_parts or version_number not in ("1", "2"):
+            errors.append("leef_pattern_mismatch")
+        else:
+            if version_number == "2":
+                # LEEF 2.0 adds a delimiter token before the extension.
+                header = parts[:5]
+                delimiter_value, extension = parts[5], parts[6]
+            else:
+                header = parts[:5]
+                delimiter_value = "\t"
+                extension = parts[5]
+            if not errors:
+                delimiter_aliases = {"\\t": "\t", "tab": "\t"}
+                delimiter = delimiter_aliases.get(delimiter_value.casefold(), delimiter_value)
+                hex_delimiter = re.fullmatch(r"(?:0x|x)([0-9a-f]{1,4})", delimiter_value, re.IGNORECASE)
+                if hex_delimiter:
+                    try:
+                        delimiter = chr(int(hex_delimiter.group(1), 16))
+                    except (ValueError, OverflowError):
+                        errors.append("invalid_leef_delimiter")
+                attrs: dict[str, str] = {}
+                for token in extension.split(delimiter):
+                    if "=" in token:
+                        key, value = token.split("=", 1)
+                        attrs[key.strip()] = value.strip()
+                event = {"leef_version": header[0], "vendor": header[1], "product": header[2],
+                         "device_version": header[3], "event_id": header[4], "attributes": attrs}
+                timestamp = attrs.get("devTime") or attrs.get("rt")
+                if timestamp:
+                    try:
+                        if timestamp.isdigit():
+                            timestamp_value = int(timestamp)
+                            unit = (attrs.get("devTimeFormat") or "").casefold()
+                            seconds = timestamp_value if unit in ("epoch", "seconds", "unix") or timestamp_value < 10_000_000_000 else timestamp_value / 1000
+                            event_time = datetime.fromtimestamp(seconds, timezone.utc)
+                        else:
+                            event_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+                        fields["event_time"] = event_time.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                    except (OverflowError, OSError, TypeError, ValueError):
+                        errors.append("invalid_timestamp_pattern")
+                else:
+                    errors.append("missing:devTime")
+                event_id = header[4] if len(header) > 4 else ""
+                action = attrs.get("action") or attrs.get("cat") or attrs.get("name") or event_id
+                fields.update(category="security_event", action=action, event_code=event_id,
+                              device_vendor=header[1], device_product=header[2])
+                aliases = {"src.ip": ("src", "srcIp"), "dst.ip": ("dst", "dstIp"),
+                           "src.port": ("srcPort",), "dst.port": ("dstPort",),
+                           "protocol": ("proto", "protocol"), "severity": ("sev", "severity")}
+                for output, candidates in aliases.items():
+                    key = next((candidate for candidate in candidates if attrs.get(candidate) not in (None, "")), None)
+                    if key is None:
+                        continue
+                    value: Any = attrs[key]
+                    if output in ("src.port", "dst.port", "severity"):
+                        try:
+                            value = int(value)
+                        except ValueError:
+                            errors.append(f"invalid_type:{key}")
+                            continue
+                    fields[output] = value
+                    mapping[output] = source_value(raw, f"{key}=", value)
+                fields["action"] = action
+                for output, key, value in (("event_time", "devTime" if attrs.get("devTime") else "rt", timestamp),
+                                           ("action", next((k for k in ("action", "cat", "name") if attrs.get(k)), ""), action)):
+                    if output in fields and key:
+                        mapping[output] = source_value(raw, f"{key}=", value)
+                mapping["event_code"] = source_value(raw, event_id, event_id)
+                if "event_time" in mapping:
+                    mapping["event_time"]["transform"] = "LEEF device time normalized to UTC"
+    elif source in ("paloalto_firewall", "windows_security", "json_application"):
         try:
             event = json.loads(text)
             if not isinstance(event, dict):
@@ -217,6 +357,140 @@ def parse(raw: bytes, source: str, version: str, source_context: dict[str, Any] 
             mapping = {k: source_value(raw, k, v) for k, v in fields.items() if k != "category"}
             mapping["event_time"] = source_value(raw, "timestamp", match["timestamp"])
             mapping["event_time"]["transform"] = "RFC3164 time + receipt year to UTC"
+    elif source == "syslog_rfc5424":
+        match = re.match(
+            r"<(?P<pri>\d{1,3})>1 (?P<timestamp>\S+) (?P<host>\S+) (?P<app>\S+) (?P<procid>\S+) (?P<msgid>\S+) (?P<sd>(?:\[[^\]]*\]|-))(?: (?P<message>.*))?",
+            text,
+        )
+        if not match or int(match["pri"]) > 191:
+            errors.append("syslog_rfc5424_pattern_mismatch")
+        else:
+            timestamp = match["timestamp"]
+            try:
+                parsed_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                fields["event_time"] = parsed_time.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            except (TypeError, ValueError):
+                errors.append("invalid_timestamp_pattern")
+            severity = int(match["pri"]) % 8
+            fields.update(
+                category="system_activity", action=(match["message"] or match["msgid"] or match["app"]),
+                severity=severity, facility=int(match["pri"]) // 8, host=match["host"],
+                application=match["app"], process_id=match["procid"], event_code=match["msgid"],
+            )
+            mapping = {key: source_value(raw, match_key, value) for key, match_key, value in (
+                ("action", "message", fields["action"]), ("severity", "pri", severity),
+                ("facility", "pri", fields["facility"]), ("host", "host", match["host"]),
+                ("application", "app", match["app"]), ("event_code", "msgid", match["msgid"]),
+            )}
+            if "event_time" in fields:
+                mapping["event_time"] = source_value(raw, "timestamp", timestamp)
+                mapping["event_time"]["transform"] = "RFC 5424 timestamp normalized to UTC"
+    elif source == "cef_security":
+        parts = re.split(r"(?<!\\)\|", text, maxsplit=7)
+        if len(parts) != 8 or not parts[0].startswith("CEF:"):
+            errors.append("cef_pattern_mismatch")
+        else:
+            header = [part.replace("\\|", "|").replace("\\\\", "\\") for part in parts[:7]]
+            version = header[0][4:]
+            extension = {
+                key: value[1:-1] if value.startswith('"') and value.endswith('"') else value
+                for key, value in re.findall(r'(?:^|\s)([A-Za-z][A-Za-z0-9]*)=("(?:\\.|[^"])*"|\S*)', parts[7])
+            }
+            name = header[5]
+            fields.update(category="security_event", action=extension.get("act") or name,
+                          event_code=header[4], device_vendor=header[1], device_product=header[2],
+                          device=extension.get("dvc"), protocol=extension.get("proto"),
+                          source_host=extension.get("shost"), destination_host=extension.get("dhost"))
+            for key, source_key, cast in (
+                ("src.ip", "src", str), ("dst.ip", "dst", str), ("src.port", "spt", int),
+                ("dst.port", "dpt", int), ("severity", "severity", int),
+            ):
+                value = extension.get(source_key, header[6] if source_key == "severity" else None)
+                if value not in (None, ""):
+                    try:
+                        fields[key] = cast(value)
+                    except (TypeError, ValueError):
+                        errors.append(f"invalid_type:{source_key}")
+            event_time = extension.get("rt")
+            if event_time:
+                try:
+                    if event_time.isdigit():
+                        fields["event_time"] = datetime.fromtimestamp(int(event_time) / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                    else:
+                        fields["event_time"] = datetime.fromisoformat(event_time.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                except (OverflowError, OSError, TypeError, ValueError):
+                    errors.append("invalid_timestamp_pattern")
+            else:
+                errors.append("missing:rt")
+            for key, source_key in (("action", "act"), ("src.ip", "src"), ("dst.ip", "dst"),
+                                    ("src.port", "spt"), ("dst.port", "dpt"), ("protocol", "proto"),
+                                    ("event_time", "rt"), ("severity", "severity")):
+                if key in fields:
+                    value = extension.get(source_key, header[6] if source_key == "severity" else fields[key])
+                    mapping[key] = source_value(raw, f"{source_key}=", value)
+            mapping["event_code"] = source_value(raw, header[4], header[4])
+            if "event_time" in mapping:
+                mapping["event_time"]["transform"] = "CEF receipt time normalized to UTC"
+    elif source == "windows_event_xml":
+        try:
+            root = ET.fromstring(text)
+            def xml_name(element: ET.Element) -> str:
+                return element.tag.rsplit("}", 1)[-1]
+            system = next((element for element in root.iter() if xml_name(element) == "System"), None)
+            if system is None:
+                raise ValueError("missing System element")
+            system_values: dict[str, str] = {}
+            for element in system.iter():
+                name = xml_name(element)
+                if name == "TimeCreated":
+                    system_values["event_time"] = element.attrib.get("SystemTime", "")
+                elif name == "Provider":
+                    system_values["provider"] = element.attrib.get("Name", "")
+                elif name == "EventID":
+                    system_values["event_code"] = (element.text or "").strip()
+                elif name == "Level":
+                    system_values["severity"] = (element.text or "").strip()
+                elif name == "Computer":
+                    system_values["host"] = (element.text or "").strip()
+                elif name == "Channel":
+                    system_values["channel"] = (element.text or "").strip()
+            event_data = next((element for element in root.iter() if xml_name(element) == "EventData"), None)
+            data_values = {
+                element.attrib.get("Name", ""): (element.text or "").strip()
+                for element in event_data.iter() if xml_name(element) == "Data"
+            } if event_data is not None else {}
+            event_code = system_values.get("event_code", "")
+            user_name = data_values.get("TargetUserName") or data_values.get("SubjectUserName")
+            source_ip = data_values.get("IpAddress") or data_values.get("SourceAddress")
+            if event_code:
+                fields["event_code"] = event_code
+            fields.update(category="identity_activity" if user_name else "security_event",
+                          action=f"Windows Event ID {event_code}" if event_code else "Windows security event",
+                          provider=system_values.get("provider"), host=system_values.get("host"),
+                          channel=system_values.get("channel"))
+            if system_values.get("severity"):
+                fields["severity"] = int(system_values["severity"])
+            if user_name:
+                fields["user.id"] = user_name
+            if source_ip and source_ip not in ("-", "::1"):
+                fields["src.ip"] = source_ip
+            if system_values.get("event_time"):
+                timestamp = system_values["event_time"]
+                fields["event_time"] = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            else:
+                errors.append("missing:TimeCreated/SystemTime")
+            for key, source_key in (("event_time", system_values.get("event_time")),
+                                    ("event_code", event_code), ("provider", system_values.get("provider")),
+                                    ("host", system_values.get("host")), ("channel", system_values.get("channel")),
+                                    ("user.id", user_name), ("src.ip", source_ip),
+                                    ("severity", system_values.get("severity"))):
+                if key in fields and source_key:
+                    mapping[key] = source_value(raw, source_key, source_key)
+                    mapping[key]["source_key"] = f"WindowsEvent.{key}"
+            if "event_time" in mapping:
+                mapping["event_time"]["transform"] = "Windows Event SystemTime normalized to UTC"
+        except (ET.ParseError, ValueError, TypeError, OverflowError):
+            errors.append("malformed_windows_event_xml")
     elif source == "nginx_access":
         match = re.match(r'(?P<ip>\S+) .*?\[(?P<timestamp>[^]]+)\] "(?P<method>\S+) (?P<path>\S+) [^"]+" (?P<status>\d+)', text)
         if not match:
@@ -312,7 +586,7 @@ def drift_for(source: str, shape: dict[str, str], version: str) -> list[str]:
 def ingest_bytes(source: str, raw: bytes, source_context: dict[str, Any] | None = None) -> dict[str, Any]:
     if source not in SOURCES and source != WITFOO_SOURCE:
         raise HTTPException(404, "Unknown source")
-    if not raw or len(raw) > 256_000:
+    if not raw or len(raw) > MAX_EVENT_BYTES:
         raise HTTPException(400, "Raw event must be 1 to 256000 bytes")
     with LOCK:
         receipt = f"rcpt_{uuid.uuid4().hex[:16]}"
@@ -334,11 +608,16 @@ def ingest_bytes(source: str, raw: bytes, source_context: dict[str, Any] | None 
         missing = [key for key in required if key not in fields]
         status = "quarantined" if errors or missing else "accepted"
         normalized = {"event_id": event_id, "receipt_id": receipt, "source_id": source, "received_at": received,
-                      "event_time": fields.get("event_time"), "schema": {"name": "logproof-canonical", "version": "1.0"},
-                      "category": fields.get("category", "system_activity"), "action": fields.get("action"),
-                      "severity": fields.get("severity"), "src": {"ip": fields.get("src.ip"), "port": None},
-                      "dst": {"ip": fields.get("dst.ip"), "port": None}, "user": {"id": fields.get("user.id")},
-                      "rule": fields.get("rule")}
+        "event_time": fields.get("event_time"), "schema": {"name": "logproof-canonical", "version": "1.0"},
+        "category": fields.get("category", "system_activity"), "action": fields.get("action"),
+        "severity": fields.get("severity"),
+        "src": {"ip": fields.get("src.ip"), "port": fields.get("src.port"), "host": fields.get("src.host")},
+        "dst": {"ip": fields.get("dst.ip"), "port": fields.get("dst.port"), "host": fields.get("dst.host")},
+        "user": {"id": fields.get("user.id")}, "rule": fields.get("rule"),
+        "protocol": fields.get("protocol"), "event_code": fields.get("event_code"),
+        "source_host": fields.get("host"), "application": fields.get("application"),
+        "provider": fields.get("provider"), "channel": fields.get("channel"),
+        "facility": fields.get("facility")}
         if source == WITFOO_SOURCE:
             normalized["category"] = fields.get("category", "security_event")
             normalized["src"] = {"ip": fields.get("src.ip"), "port": fields.get("src.port"), "host": fields.get("src.host")}
@@ -396,10 +675,34 @@ def sample(source: str, sequence: int, drift: bool = False) -> bytes:
         return json.dumps(obj, separators=(",", ":")).encode()
     if source == "cisco_router":
         return b"Sep 24 12:34:56 edge-01 %LINK-3-UPDOWN: Interface GigabitEthernet0/1 changed state to up"
+    if source == "syslog_rfc5424":
+        return b'<165>1 2026-09-24T12:34:56.000Z edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44" software="sshd"] Accepted publickey for analyst'
+    if source == "cef_security":
+        stamp_ms = int(datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        return f"CEF:0|Palo Alto Networks|PAN-OS|11.1|THREAT|Suspicious connection|8|rt={stamp_ms} src=198.51.100.23 dst=203.0.113.40 spt=51642 dpt=443 proto=TCP act=deny msg=Blocked outbound connection".encode()
     if source == "nginx_access":
         return b'203.0.113.14 - - [24/Sep/2026:12:34:56 +0000] "GET /api/health HTTP/1.1" 200 52'
     if source == "windows_security":
         return json.dumps({"TimeCreated": stamp, "EventID": "4624", "TargetUserName": "analyst"}, separators=(",", ":")).encode()
+    if source == "windows_event_xml":
+        return (
+            '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">'
+            '<System><Provider Name="Microsoft-Windows-Security-Auditing"/><EventID>4624</EventID>'
+            '<Level>4</Level><TimeCreated SystemTime="2026-09-24T12:34:56.000Z"/>'
+            '<Channel>Security</Channel><Computer>WORKSTATION-07</Computer></System>'
+            '<EventData><Data Name="TargetUserName">analyst</Data>'
+            '<Data Name="IpAddress">198.51.100.23</Data></EventData></Event>'
+        ).encode()
+    if source == "csv_network":
+        return (
+            "timestamp,action,src_ip,dst_ip,src_port,dst_port,protocol,severity\n"
+            f"{stamp},allowed,198.51.100.{(sequence % 100) + 1},203.0.113.10,52340,443,TCP,2\n"
+        ).encode()
+    if source == "leef_security":
+        return (
+            "LEEF:2.0|LogProof Labs|Edge Sensor|1.0|BLOCKED_FLOW|^|"
+            f"devTime={stamp}^src=198.51.100.23^dst=203.0.113.40^srcPort=51642^dstPort=443^proto=TCP^sev=8^cat=Blocked outbound connection^action=deny"
+        ).encode()
     return json.dumps({"timestamp": stamp, "message": "Job completed", "user": "scheduler"}, separators=(",", ":")).encode()
 
 
@@ -411,7 +714,10 @@ def health() -> dict[str, str]:
 @app.get("/api/overview")
 def overview() -> dict[str, Any]:
     with connect() as db:
-        counts = {r["quality"]: r["count"] for r in db.execute("SELECT json_extract(quality,'$.status') AS quality, count(*) AS count FROM events GROUP BY quality")}
+        counts = {r["status"]: r["count"] for r in db.execute(
+            "SELECT json_extract(events.quality,'$.status') AS status, count(*) AS count "
+            "FROM events GROUP BY json_extract(events.quality,'$.status')"
+        )}
         drifts = db.execute("SELECT count(*) FROM events WHERE drift!='[]'").fetchone()[0]
         dataset_samples = db.execute("SELECT count(*) FROM dataset_imports").fetchone()[0]
     return {"accepted": counts.get("accepted", 0), "quarantined": counts.get("quarantined", 0),
@@ -420,9 +726,88 @@ def overview() -> dict[str, Any]:
             "registry": registry(), "simulator_running": bool(WORKER and WORKER.is_alive())}
 
 
+def import_ndjson(payload: bytes) -> dict[str, Any]:
+    if not payload or len(payload) > MAX_BATCH_BYTES:
+        raise HTTPException(413 if len(payload) > MAX_BATCH_BYTES else 400,
+                            f"NDJSON batch must be 1 to {MAX_BATCH_BYTES} bytes")
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise HTTPException(400, "NDJSON batch must be UTF-8") from exc
+    records = [(line_number, line) for line_number, line in enumerate(lines, start=1) if line.strip()]
+    if len(records) > MAX_BATCH_EVENTS:
+        raise HTTPException(413, f"NDJSON batch is limited to {MAX_BATCH_EVENTS} records")
+    items: list[dict[str, Any]] = []
+    accepted = quarantined = rejected = 0
+    for line_number, line in records:
+        try:
+            envelope = json.loads(line)
+            if not isinstance(envelope, dict):
+                raise ValueError("Each line must be a JSON object")
+            source_id, raw_text, raw_base64 = envelope.get("source_id"), envelope.get("raw"), envelope.get("raw_base64")
+            if not isinstance(source_id, str):
+                raise ValueError("Each object needs a string field 'source_id'")
+            if isinstance(raw_text, str) and raw_base64 is None:
+                raw = raw_text.encode("utf-8")
+            elif isinstance(raw_base64, str) and raw_text is None:
+                try:
+                    raw = base64.b64decode(raw_base64, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise ValueError("raw_base64 must be valid base64") from exc
+            else:
+                raise ValueError("Each object needs exactly one of the string fields 'raw' or 'raw_base64'")
+            if not raw or len(raw) > MAX_EVENT_BYTES:
+                raise ValueError(f"raw must be 1 to {MAX_EVENT_BYTES} UTF-8 bytes")
+            item = ingest_bytes(source_id, raw)
+            state = item["quality"]["status"]
+            accepted += state == "accepted"
+            quarantined += state == "quarantined"
+            items.append({"line": line_number, "source_id": source_id, "status": state, "event": item})
+        except HTTPException as exc:
+            rejected += 1
+            items.append({"line": line_number, "status": "rejected", "error": str(exc.detail)})
+        except (json.JSONDecodeError, ValueError) as exc:
+            rejected += 1
+            items.append({"line": line_number, "status": "rejected", "error": str(exc)})
+    return {"submitted": len(records), "accepted": accepted, "quarantined": quarantined,
+            "rejected": rejected, "items": items}
+
+
+@app.post("/api/ingest/batch")
+async def ingest_batch(request: Request) -> dict[str, Any]:
+    declared_length = request.headers.get("content-length")
+    if declared_length and declared_length.isdigit() and int(declared_length) > MAX_BATCH_BYTES:
+        raise HTTPException(413, f"NDJSON batch is limited to {MAX_BATCH_BYTES} bytes")
+    chunks: list[bytes] = []
+    byte_count = 0
+    async for chunk in request.stream():
+        byte_count += len(chunk)
+        if byte_count > MAX_BATCH_BYTES:
+            raise HTTPException(413, f"NDJSON batch is limited to {MAX_BATCH_BYTES} bytes")
+        chunks.append(chunk)
+    return import_ndjson(b"".join(chunks))
+
+
 @app.post("/api/ingest/{source_id}")
 async def ingest(source_id: str, request: Request) -> dict[str, Any]:
     return ingest_bytes(source_id, await request.body())
+
+
+@app.get("/api/events/export.ndjson")
+def export_events() -> StreamingResponse:
+    def lines() -> Iterator[str]:
+        with connect() as db:
+            cursor = db.execute("SELECT * FROM events ORDER BY rowid ASC")
+            for row in cursor:
+                record = row_to_event(row)
+                raw = (DATA / row["raw_path"]).read_bytes()
+                try:
+                    record["raw"] = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    record["raw_base64"] = base64.b64encode(raw).decode("ascii")
+                yield json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+    return StreamingResponse(lines(), media_type="application/x-ndjson",
+                             headers={"Content-Disposition": "attachment; filename=logproof-events.ndjson"})
 
 
 @app.get("/api/datasets/witfoo/status")

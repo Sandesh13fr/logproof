@@ -1,20 +1,27 @@
 services:
   api:
+    image: logproof-prototype-api:local
     build:
       context: .
       dockerfile: backend/Dockerfile
     environment:
       LOGPROOF_DATA: /app/data
+      LOGPROOF_ALLOWED_ORIGINS: "http://127.0.0.1:${LOGPROOF_WEB_PORT:-3000},http://localhost:${LOGPROOF_WEB_PORT:-3000}"
     volumes:
-      - ./data:/app/data
-      - ./parsers:/app/parsers:ro
+      - type: bind
+        source: ${LOGPROOF_DATA_DIR:-./data}
+        target: /app/data
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${LOGPROOF_API_PORT:-8000}:8000"
   web:
-    build: .
+    image: logproof-prototype-web:local
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_API_URL: "http://127.0.0.1:${LOGPROOF_API_PORT:-8000}"
     environment:
-      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      NEXT_PUBLIC_API_URL: "http://127.0.0.1:${LOGPROOF_API_PORT:-8000}"
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${LOGPROOF_WEB_PORT:-3000}:3000"
     depends_on:
       - api

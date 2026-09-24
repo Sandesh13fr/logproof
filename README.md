@@ -1,117 +1,145 @@
-# LogProof
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="LogProof preserves an RFC 5424 syslog record and maps it to a traceable structured event">
+</p>
 
-Local-first Smart India Hackathon 2026 demonstration for log preprocessing assurance. The working proof paths are **mapping failure → preserved evidence → replay-gated parser promotion**. Generated logs are available offline, with an optional small sample import from the published WitFoo Precinct6 SOC dataset.
+<h1 align="center">LogProof</h1>
 
-## Run locally on Windows 11
+<p align="center"><strong>A local-first prototype for inspecting security log parsing and reviewing parser changes.</strong></p>
 
-Install Python 3.12+ and Node.js 22+ once. After dependencies are installed, the demo itself needs no internet connection.
+<p align="center">
+  Preserve the raw event · Trace normalized fields · Detect parser drift · Replay before approval
+</p>
+
+## See the processing path
+
+LogProof stores each received event before parsing, maps normalized fields back to the source record, and quarantines failed or incomplete parses. The parser replay and approval flow is currently implemented for the firewall example.
+
+<p align="center">
+  <img src="./assets/readme/workflow.svg" width="100%" alt="The LogProof prototype flow from varied raw log formats through evidence capture, normalization and validation to a firewall parser replay gate">
+</p>
+
+## Formats in the demo
+
+The simulator creates ten sample source families across eight raw formats. In **Live ingestion**, you can paste one event (up to 256 KB), import a mixed-format NDJSON batch, or export all event records. Samples are synthetic unless identified as the optional WitFoo dataset import.
+
+| Sample source | Raw format | Example fields or behavior |
+| --- | --- | --- |
+| Firewall | JSON | Time, action, source/destination IP, rule, severity; deliberate rule-shape drift |
+| Cisco-style router | RFC 3164-style Syslog | PRI severity, timestamp, device message |
+| Syslog event | RFC 5424 | PRI, timestamp, host, application, message ID, structured data and message |
+| Security device | CEF | Event header, severity, timestamp, source/destination, ports, protocol and action |
+| Web server | NGINX combined access log | Client IP, time, method/path and response status |
+| Windows security | Simplified JSON | Time, event ID and username; this is a sample, not native Event Viewer output |
+| Windows Event | Event XML | Provider, event ID, time, channel, computer, username and source IP |
+| Application | JSON | Time, message and user |
+| Network flow | CSV | Header plus one row; timestamp, action, IPs, ports, protocol and severity |
+| Security device | LEEF 1.0 / 2.0 | Event ID, vendor/product, device time, source/destination, protocol and severity |
+
+The CSV parser accepts one event per input with its header row. NDJSON batches contain one envelope per line: `{"source_id":"csv_network","raw":"timestamp,action\\n2026-09-24T12:34:56Z,allowed"}`. For non-UTF-8 event bytes, use `raw_base64` instead of `raw`. A batch may mix source IDs and raw formats. It is limited to 100 events, 2 MB total, and 256 KB per raw event; malformed or unknown-source lines are reported individually while valid records still receive their own raw evidence, receipt, and hash. Export is one complete stored event object per line at `GET /api/events/export.ndjson`, including the original raw text or base64 bytes for byte-exact round trips.
+
+LEEF parsing covers common 1.0 tab-separated attributes and 2.0 literal/hex attribute delimiters. IBM describes LEEF headers, the tab delimiter, and the LEEF 2.0 alternate delimiter in its [LEEF event components reference](https://www.ibm.com/docs/en/qradar-on-cloud?topic=overview-leef-event-components). This parser supports representative fields and ISO 8601 or epoch timestamps; it is not a full implementation of every vendor extension. The Cisco parser recognizes the demo's common RFC 3164-style pattern, not every RFC 3164 variant. RFC 5424, CEF, and Windows XML are likewise prototype parsers. An optional bounded import fetches sanitized events from the [WitFoo Precinct6 dataset](https://huggingface.co/datasets/witfoo/precinct6-cybersecurity-100m); it does not download the full dataset and requires network access.
+
+## Run locally
+
+**Requirements:** Python 3.12 or later and Node.js 22 or later.
+
+Install dependencies once:
 
 ```powershell
 python -m pip install -r backend/requirements.txt
 npm ci
 ```
 
-In one PowerShell window:
+Start the API in one terminal:
 
 ```powershell
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-In another:
+Start the web app in another:
 
 ```powershell
 npm run dev
 ```
 
-Open **http://localhost:3000**. The API is at **http://127.0.0.1:8000**. The backend seeds one baseline event from each of five source families on first launch. Data persists under `data/` until reset.
+Open <http://localhost:3000>. The API documentation is at <http://127.0.0.1:8000/docs>. Generated events and evidence are stored in `data/`; reset the demo from the app footer.
 
-## Import a WitFoo sample
+## Run with Docker Compose
 
-In **Live ingestion**, select **Import 20 WitFoo events**. The backend requests one bounded page from the public [WitFoo Precinct6 Cybersecurity dataset](https://huggingface.co/datasets/witfoo/precinct6-cybersecurity-100m) through Hugging Face's dataset viewer, then stores each sanitized source message in the local raw vault before normalizing it. It does not download the 114-million-event dataset. Imported rows retain their dataset artifact ID, stream, organization token, source label, and available ATT&CK context. The Evidence explorer opens the newest record to show the raw syslog, canonical fields, source mapping, and dataset attribution. Publisher labels are kept as machine-derived context, not treated as analyst-confirmed ground truth.
+Docker Compose builds the web and API containers. Their data directory is bind-mounted so events remain available in `data/` across container restarts.
 
-This optional import needs an internet connection. Once fetched, imported evidence is stored under the same local `data/` directory as the generated events and can be inspected offline. The dataset card lists the Apache-2.0 license. The importer defaults to 20 records and accepts at most 50 per API request; repeat imports continue from the next stored dataset row.
-
-For Linux or macOS, use the same commands in separate terminals. Set `LOGPROOF_DATA` to a local directory if you want a different storage location.
-
-## Docker Compose
-
-Where Docker Compose is installed:
-
-```sh
+```powershell
 docker compose up --build
 ```
 
-The web app binds to localhost port 3000 and the API to localhost port 8000. The raw vault and SQLite database are bind-mounted from `./data`. Images need to be built while dependencies are available; the running demo uses no external services. Docker was not available in the development environment, so this path is provided but has not been run here.
+Open <http://localhost:3000>. If those ports are already in use, choose alternate host ports and an isolated data directory:
 
-## Hosted demo
-
-The [frontend](https://logproof.younix.xyz) deploys to Vercel and the [API](https://logproof-api.onrender.com/api/health) deploys to Render from the `master` branch of the private GitHub repository. Vercel's production `NEXT_PUBLIC_API_URL` is `https://logproof-api.onrender.com`. The backend permits the production frontend domains plus localhost; additional origins can be supplied with comma-separated `LOGPROOF_ALLOWED_ORIGINS`.
-
-The hosted API uses Render's free web service and stores its SQLite database and raw receipts on the service's temporary filesystem. It may sleep when idle and its data resets when the service restarts or redeploys. The hosted workspace is shared and unauthenticated, so use only the supplied synthetic logs; keep sensitive or real production logs in a controlled local deployment.
-
-## Pricing proposal
-
-The **Pricing** section presents an illustrative India-market packaging proposal from the supplied pricing reference: Community, Team, Secure, Enterprise / Government, and a 12-week paid pilot. Its rupee amounts are proposal figures, not live commercial terms. Daily ingest limits, HA, RBAC, signed packs, air-gap bundle flows, and support levels are proposed targets and have not been demonstrated by this prototype. Hardware, storage, taxes, travel, and custom integrations would need separate scoping.
-
-A last-30-days research pass for 25 August–24 September 2026 returned thin, partly rate-limited discussion and did not validate willingness to pay or these rupee price points. Current vendor pages show that log products may combine ingest-volume and support/package dimensions, but they are not direct price comparators for LogProof ([Cribl pricing](https://cribl.io/pricing/plan/), [Datadog log billing](https://docs.datadoghq.com/account_management/billing/log_management/)). A buyer pilot and measured workload are needed before using these figures as a quote.
-
-## Why LogProof
-
-The **Why LogProof** section explains the purpose of the prototype: make the conversion from raw security logs to structured events inspectable, and make parser changes reviewable. Its assurance sequence links directly to the Evidence explorer, Drift watch, and Replay lab. The competitor comparison acknowledges existing preview, simulation, replay, and transform-test capabilities; it describes each product's documented role and LogProof's proposed emphasis without claiming missing features. Source links and claim boundaries are recorded in [the product marketing context](.agents/product-marketing.md). The downstream SIEM placement is conceptual; this prototype does not export to one.
-
-## Two-to-four-minute jury walkthrough
-
-1. **Overview → Start guided demo.** Show five local source formats and live receipts. Each event is saved to the raw vault before parsing.
-2. **Live ingestion → Import 20 WitFoo events** (optional, requires internet). Open the newest record in Evidence explorer and show the sanitized source syslog transformed into the canonical event, with field-level source mapping and its dataset artifact ID.
-3. **Drift watch → Trigger format change.** The firewall's `rule` changes from a string to an object. The active v1.4.2 parser cannot map it, so the event is quarantined and its type change is shown.
-4. **Evidence explorer.** Select a receipt. Show its exact raw text, SHA-256 integrity check, parser version, and field-to-source mapping. Clicking a mapped field highlights its source in the raw view.
-5. **Replay lab → Run replay.** The old and candidate parsers process identical golden and stored samples. Show rule mapping restoration, required-field coverage, golden results, and regression count.
-6. Enter the presenter's name and choose **Approve & promote**. The active parser becomes v1.4.3; v1.4.2 remains the rollback target. The registry shows each local pack checksum. Use **Roll back parser** to demonstrate recovery.
-
-Use **Reset demo** in the footer, or run `scripts/reset_demo.ps1`, to clear local records and reseed the five baseline events. Reset also returns the active firewall parser to v1.4.2.
-
-## Architecture
-
-```mermaid
-flowchart LR
-  A[Deterministic local simulator\n5 source families] --> B[FastAPI collector]
-  B --> C[Raw byte vault\nreceipt + SHA-256]
-  C --> D[Versioned parser]
-  D --> E[Canonical event + field map]
-  E --> F{Validation and shape drift}
-  F -->|valid| G[Accepted in SQLite]
-  F -->|uncertain| H[Quarantine in SQLite]
-  H --> I[Replay same corpus]
-  I --> J{Golden tests and regressions}
-  J -->|pass and human approval| K[Promote candidate\nretain rollback]
+```powershell
+$env:LOGPROOF_WEB_PORT = "3100"
+$env:LOGPROOF_API_PORT = "8100"
+$env:LOGPROOF_DATA_DIR = "$env:TEMP\logproof-compose-data"
+docker compose up --build
 ```
 
-The collector receives raw bytes at `POST /api/ingest/{source_id}`. It assigns a receipt ID, writes those bytes to `data/raw/`, records their SHA-256, and only then invokes a deterministic parser. `POST /api/datasets/witfoo/import` obtains a bounded source page and passes each original sanitized log message through that same vault and evidence path; `GET /api/datasets/witfoo/status` reports the stored sample count and next row. Normalized events, quality, parser version, shape, and field mapping are kept in SQLite. `GET /api/evidence/{receipt_id}` rereads the original file and verifies its hash. The hash proves integrity of ingested bytes relative to this local vault; it does not prove the source device's identity.
+Open <http://localhost:3100>. The API is available at <http://127.0.0.1:8100>. Stop the Compose services with `Ctrl+C`, or run `docker compose down` in another terminal.
 
-Firewall parser packs live under `parsers/paloalto-traffic/{version}/`. Each has `manifest.yaml`, `rules.yaml`, `golden_samples.jsonl`, `expected_outputs.jsonl`, and `checksum.sha256`. The YAML files use JSON syntax, which is a valid YAML subset and needs no extra parser dependency. The backend loads the rule mapping from the selected pack, computes pack checksums, and verifies the candidate checksum before promotion. The checksums are local integrity checks, not digital signatures.
-
-## API and controls
-
-FastAPI documents all routes at `/docs` while the backend runs. Key endpoints: `/api/overview`, `/api/events`, `/api/evidence/{receipt_id}`, `/api/drift`, `/api/quarantine`, `/api/simulator/scenario/{baseline|mapping-failure|malformed|reset}`, `/api/replay`, `/api/parser/approve`, and `/api/parser/rollback`. Source simulation controls support starting, stopping, per-source pause, rate 1–5/s, and one-event emission. The UI polls the local API every 2.5 seconds.
-
-## Verification
+## Verify the demo
 
 ```powershell
 python scripts/smoke.py
+npm run lint
 npm run build
 ```
 
-The smoke check uses temporary storage, so it does not change demo data. It checks ingest, quarantine, drift, raw-hash verification, replay gates, promotion, and rollback.
+The smoke check uses a temporary database and verifies the ten source samples, CSV and LEEF parsing, LEEF 1.0 tabs and a LEEF 2.0 hex delimiter, mixed-source NDJSON import/export, raw-hash checks, malformed-input quarantine, firewall drift, parser replay, approval, and rollback.
 
-## Implemented and future work
+The Docker Compose path was built and run with Docker Desktop using host ports 3100/8100 and a temporary data directory. The web page returned HTTP 200; the API health check, ten-source overview, CORS, and raw ingestion plus evidence-hash verification for RFC 5424, CEF, and Windows Event XML passed.
 
-Implemented: five local source generators; bounded optional import from the public WitFoo SOC dataset; raw evidence vault; SQLite event metadata; deterministic parsing; firewall shape drift and quarantine; field-level mapping; equal-corpus replay; golden checks; named human approval; versioned parser packs with local checksums; rollback; responsive console and one-click reset.
+### Bounded local workload
 
-Future: actual syslog UDP/TCP listeners, streaming backpressure, configurable parser rules loaded from manifests, Ed25519-signed parser packs, source authentication, broader schema baselines, complete OCSF mapping, multiuser approvals, and performance benchmarking. UI figures are computed from the running demo or explicitly marked as measured. This is a prototype, not a production SIEM.
+Run `python scripts/benchmark_ingest.py --count 1000` (the script hard-caps runs at 5,000 events). It uses temporary local storage and synchronously exercises parse, hash, raw-file write, and SQLite receipt write over all ten synthetic source families. One 1,000-event run on Windows 11, Python 3.12.6, completed in 15.982 seconds: **62.57 events/second**, 13.040 ms median and 18.392 ms p95 per-event latency, across 153,345 raw bytes. This is a sequential single-process microbenchmark with no HTTP, concurrency, or production-sized data; it is not a capacity or scale claim.
 
-## Troubleshooting
+### Offline container transfer
 
-- If the UI says the API is disconnected, start `uvicorn` and confirm `http://127.0.0.1:8000/api/health` responds.
-- If ports 3000 or 8000 are occupied, stop the other process before starting this demo. The frontend currently expects the API on port 8000.
-- If the parser candidate cannot be promoted, run replay and inspect the gates. A deliberately malformed firewall event in the corpus blocks promotion; reset the demo to return to the clean scenario.
-- If offline startup fails after checkout, install Python and npm dependencies once while online, then run the demo offline.
+`scripts/export_offline_bundle.ps1` builds fixed-tag API and web images, saves them to `logproof-images.tar`, includes Compose configuration and a matching `.env`, and writes a manifest plus SHA-256 checksum. For example:
+
+```powershell
+.\scripts\export_offline_bundle.ps1 -BundleDirectory "$env:TEMP\logproof-offline" -WebPort 3100 -ApiPort 8100
+```
+
+Copy the complete output folder to the target machine, check the tar hash against `SHA256.txt`, then run:
+
+```powershell
+docker load --input .\logproof-images.tar
+docker compose --env-file .env up --no-build --pull never -d
+```
+
+The app images include parsers, application code, and runtime dependencies. The target needs Docker Engine and the Compose plugin; it does not need the source tree or registry access to start the packaged services. A transfer-path check removed the two uniquely tagged app images from this Docker engine, loaded them from the generated tar, and started Compose with `--no-build --pull never`. The frontend returned HTTP 200; the API exposed ten sources, accepted a LEEF batch record, and returned a successful NDJSON export. This verifies a no-pull image archive load/start on this engine; it is not a deployment test on a separate air-gapped ministry host. Persistent `./data` should be backed up separately. The optional WitFoo fetch needs a network connection.
+
+## What is implemented
+
+- A local API and web console with ten synthetic source families, single-event ingestion, mixed-source batch import, and NDJSON export.
+- Raw event storage before parsing, receipt IDs, recorded SHA-256 hashes, and field-to-source mappings.
+- Representative parsers for JSON, CSV, LEEF, Cisco-style Syslog, RFC 5424, CEF, NGINX combined logs, and Windows Event XML.
+- Validation and quarantine for malformed or incomplete records; firewall shape-drift detection.
+- A versioned firewall parser example with golden samples, equal-corpus replay, named approval, and rollback.
+- A bounded optional WitFoo dataset import with dataset attribution.
+- Dockerfiles, Compose configuration, and an offline image bundle/export workflow for running the two application services locally or transferring their images without registry pulls.
+
+## Prototype boundaries
+
+LogProof is a hackathon prototype, not a universal preprocessing platform or production SIEM. Its canonical schema is LogProof's own limited schema; it does not provide a complete OCSF mapping. Parsers use explicit source mappings, and only the firewall parser participates in replay and promotion. The project does not yet provide native network listeners, streaming backpressure, source authentication, SIEM or data lake export, multi-user access controls, or a production throughput assessment. SQLite and local file storage have not been load-tested for ministry or billion-event workloads.
+
+The recorded SHA-256 digest checks whether stored bytes still match the digest captured on receipt. It does not authenticate the sending device or prove who originally produced a log.
+
+## References
+
+- [Next.js: hydration error causes and `suppressHydrationWarning`](https://nextjs.org/docs/messages/react-hydration-error)
+- [Python `csv` module documentation](https://docs.python.org/3/library/csv.html)
+- [NDJSON specification](https://github.com/ndjson/ndjson-spec)
+- [IBM QRadar: LEEF event components](https://www.ibm.com/docs/en/qradar-on-cloud?topic=overview-leef-event-components)
+- [RFC 5424: The Syslog Protocol](https://www.rfc-editor.org/rfc/rfc5424)
+- [Docker image save and load reference](https://docs.docker.com/reference/cli/docker/image/)
+- [WitFoo Precinct6 Cybersecurity dataset card on Hugging Face](https://huggingface.co/datasets/witfoo/precinct6-cybersecurity-100m)
+- [Hugging Face Datasets documentation](https://huggingface.co/docs/datasets/index)
+- [Local bounded workload procedure and script](scripts/benchmark_ingest.py)

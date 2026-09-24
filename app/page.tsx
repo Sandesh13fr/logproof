@@ -159,13 +159,33 @@ type Registry = {
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const HOSTED = API.startsWith("https://");
 const PAGE_SIZE = 20;
+const MAX_BATCH_CHARS = 2_000_000;
+const NDJSON_EXAMPLE = [
+  {
+    source_id: "csv_network",
+    raw: "timestamp,action,src_ip,dst_ip,src_port,dst_port,protocol,severity\n2026-09-24T12:34:56Z,allowed,198.51.100.21,203.0.113.10,52340,443,TCP,2",
+  },
+  {
+    source_id: "leef_security",
+    raw: "LEEF:2.0|LogProof Labs|Edge Sensor|1.0|BLOCKED_FLOW|^|devTime=2026-09-24T12:34:56Z^src=198.51.100.23^dst=203.0.113.40^srcPort=51642^dstPort=443^proto=TCP^sev=8^cat=Blocked outbound connection^action=deny",
+  },
+  {
+    source_id: "syslog_rfc5424",
+    raw: '<165>1 2026-09-24T12:34:56.000Z edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44"] Accepted publickey for analyst',
+  },
+].map((record) => JSON.stringify(record)).join("\n");
 const names: Record<string, string> = {
   witfoo_soc: "WitFoo SOC dataset",
   paloalto_firewall: "Palo Alto-style Firewall",
   cisco_router: "Cisco-style Router",
+  syslog_rfc5424: "RFC 5424 Syslog",
+  cef_security: "CEF security event",
   nginx_access: "NGINX Access",
   windows_security: "Windows Security",
+  windows_event_xml: "Windows Event XML",
   json_application: "Application JSON",
+  csv_network: "Network flow CSV",
+  leef_security: "Security device LEEF",
 };
 const tabs = [
   { id: "overview", label: "Overview", icon: Layers3 },
@@ -411,6 +431,11 @@ export default function Home() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
+  const [rawSource, setRawSource] = useState("syslog_rfc5424");
+  const [rawInput, setRawInput] = useState(
+    '<165>1 2026-09-24T12:34:56.000Z edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44"] Accepted publickey for analyst',
+  );
+  const [batchInput, setBatchInput] = useState(NDJSON_EXAMPLE);
   const refresh = useCallback(async () => {
     try {
       const [nextOverview, nextEvents, nextRegistry] = await Promise.all([
@@ -569,6 +594,91 @@ export default function Home() {
           ? cause.message
           : "Could not import the WitFoo sample.",
       );
+    } finally {
+      setBusy("");
+    }
+  }
+  async function ingestRawEvent() {
+    if (!rawInput.trim()) {
+      setError("Paste one raw event before processing it.");
+      return;
+    }
+    setBusy("Raw event");
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/api/ingest/${rawSource}`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        body: rawInput,
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error((await response.text()).slice(0, 180) || `Request failed: ${response.status}`);
+      }
+      const item = (await response.json()) as Event;
+      setLivePage(0);
+      await refresh();
+      setSelected(item.event_id);
+      setSelectedRecord(item);
+      setField(null);
+      setEvidencePage(0);
+      setEvidenceData(null);
+      setTab("evidence");
+      setNotice(`Raw ${item.raw_format} event processed: ${item.quality.status}. Inspect its source fields and normalized record.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not process this raw event.");
+    } finally {
+      setBusy("");
+    }
+  }
+  async function importNdjsonBatch() {
+    setBusy("NDJSON batch");
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/api/ingest/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-ndjson; charset=utf-8" },
+        body: batchInput,
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error((await response.text()).slice(0, 180) || `Request failed: ${response.status}`);
+      const result = (await response.json()) as {
+        submitted: number;
+        accepted: number;
+        quarantined: number;
+        rejected: number;
+      };
+      setLivePage(0);
+      const firstPage = await getEventsPage(0);
+      setLiveData(firstPage);
+      setNotice(`NDJSON batch complete: ${result.submitted} submitted · ${result.accepted} accepted · ${result.quarantined} quarantined · ${result.rejected} rejected. Receipts are available below.`);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not import this NDJSON batch.");
+    } finally {
+      setBusy("");
+    }
+  }
+  async function exportNdjson() {
+    setBusy("NDJSON export");
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/api/events/export.ndjson`, { cache: "no-store" });
+      if (!response.ok) throw new Error((await response.text()).slice(0, 180) || `Request failed: ${response.status}`);
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "logproof-events.ndjson";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice("NDJSON export downloaded with normalized records, receipts, hashes, field maps, and quality results.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not export NDJSON.");
     } finally {
       setBusy("");
     }
@@ -885,14 +995,14 @@ export default function Home() {
                     <div className="panel-title-row">
                       <div>
                         <p className="eyebrow">DEMO INPUTS</p>
-                        <CardTitle>Simulated sources</CardTitle>
+                    <CardTitle>Simulated sources</CardTitle>
                       </div>
                       <span className="tiny-muted">
-                        {overview?.sources.length || 5} CONNECTED
+                        {overview?.sources.length || 8} SOURCE FAMILIES
                       </span>
                     </div>
                     <CardDescription>
-                      Deterministic samples generated by the demo backend.
+                      Synthetic samples span JSON, RFC 3164 and 5424 syslog, CEF, combined web access, and Windows Event XML.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="sources-list">
@@ -923,7 +1033,7 @@ export default function Home() {
               <Heading
                 eyebrow="01 / INGEST"
                 title="Live ingestion"
-                description="Generated and imported events get a receipt before parsing. Select a row to inspect its evidence."
+                description="Simulated, pasted, and imported events receive a receipt before parsing."
                 action={
                   <div className="heading-actions">
                     <Button
@@ -981,6 +1091,94 @@ export default function Home() {
                   </div>
                 }
               />
+              <Card className="panel raw-ingest-panel">
+                <CardHeader>
+                  <CardTitle>Process a raw event</CardTitle>
+                  <CardDescription>
+                    Paste one event in its original format. LogProof stores the raw bytes, parses the selected format, and opens the normalized record with its evidence.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="raw-ingest-grid">
+                    <label>
+                      Input format
+                      <select
+                        aria-label="Raw event input format"
+                        value={rawSource}
+                        disabled={!!busy}
+                        onChange={(event) => setRawSource(event.target.value)}
+                      >
+                        {overview?.sources.map((source) => (
+                          <option key={source.id} value={source.id}>
+                            {source.format} · {source.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="raw-ingest-record">
+                      Raw record
+                      <textarea
+                        aria-label="Raw event record"
+                        className="mono"
+                        maxLength={256000}
+                        rows={3}
+                        placeholder="Paste one raw event in the selected format…"
+                        value={rawInput}
+                        disabled={!!busy}
+                        onChange={(event) => setRawInput(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="raw-ingest-footer">
+                    <span>Single event · up to 256 KB · saved before parsing</span>
+                    <Button disabled={!!busy || !rawInput.trim()} onClick={() => void ingestRawEvent()}>
+                      <FileCode2 data-icon="inline-start" />
+                      {busy === "Raw event" ? "Processing…" : "Process raw event"}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="panel raw-ingest-panel">
+                <CardHeader>
+                  <div className="panel-title-row">
+                    <CardTitle>NDJSON batch transfer</CardTitle>
+                    <span className="tiny-muted">MIXED SOURCE FORMATS</span>
+                  </div>
+                  <CardDescription>
+                    Import one JSON envelope per line. Each envelope names a source and carries its original raw event; exports include readable UTF-8 or base64 for byte-exact round trips.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="raw-ingest-grid batch-ingest-grid">
+                    <label className="raw-ingest-record">
+                      NDJSON records
+                      <textarea
+                        aria-label="NDJSON batch records"
+                        className="mono"
+                        maxLength={MAX_BATCH_CHARS}
+                        rows={6}
+                        spellCheck={false}
+                        value={batchInput}
+                        disabled={!!busy}
+                        onChange={(event) => setBatchInput(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="raw-ingest-footer">
+                    <span>Up to 100 events · 2 MB batch · 256 KB per raw event</span>
+                    <div className="batch-ingest-actions">
+                      <Button variant="outline" disabled={!!busy} onClick={() => void exportNdjson()}>
+                        <Download data-icon="inline-start" />
+                        {busy === "NDJSON export" ? "Preparing…" : "Export all NDJSON"}
+                      </Button>
+                      <Button disabled={!!busy || !batchInput.trim()} onClick={() => void importNdjsonBatch()}>
+                        <FileCode2 data-icon="inline-start" />
+                        {busy === "NDJSON batch" ? "Importing…" : "Import batch"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
               <Card className="panel">
                 <CardHeader>
                   <div className="panel-title-row">

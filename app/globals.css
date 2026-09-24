@@ -171,6 +171,10 @@ select:focus-visible {
   outline: 3px solid #ef8058;
   outline-offset: 2px;
 }
+textarea:focus-visible {
+  outline: 3px solid #ef8058;
+  outline-offset: 2px;
+}
 .app-shell {
   min-height: 100vh;
   display: grid;
@@ -1366,6 +1370,62 @@ select:focus-visible {
 .control-row button {
   min-width: 74px;
 }
+.raw-ingest-panel {
+  margin: 0 0 16px;
+}
+.raw-ingest-grid {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.34fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.raw-ingest-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #586c7c;
+  font-size: 11px;
+  font-weight: 650;
+}
+.raw-ingest-grid select,
+.raw-ingest-grid textarea {
+  width: 100%;
+  border: 1px solid #dce3e9;
+  border-radius: 6px;
+  color: #273b4e;
+  background: #fff;
+}
+.raw-ingest-grid select {
+  height: 38px;
+  padding: 0 9px;
+}
+.raw-ingest-grid textarea {
+  min-height: 78px;
+  padding: 9px 10px;
+  resize: vertical;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.batch-ingest-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+.batch-ingest-grid textarea {
+  min-height: 138px;
+}
+.batch-ingest-actions {
+  display: flex;
+  gap: 8px;
+}
+.raw-ingest-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 11px;
+}
+.raw-ingest-footer > span {
+  color: #82919d;
+  font-size: 10px;
+}
 .footer {
   display: flex;
   align-items: center;
@@ -1608,6 +1668,16 @@ select:focus-visible {
   }
   .control-row label {
     margin-right: auto;
+  }
+  .raw-ingest-grid {
+    grid-template-columns: 1fr;
+  }
+  .raw-ingest-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .batch-ingest-actions {
+    flex-wrap: wrap;
   }
 }
 @media (prefers-reduced-motion: reduce) {
