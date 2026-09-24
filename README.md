@@ -37,6 +37,12 @@ docker compose up --build
 
 The web app binds to localhost port 3000 and the API to localhost port 8000. The raw vault and SQLite database are bind-mounted from `./data`. Images need to be built while dependencies are available; the running demo uses no external services. Docker was not available in the development environment, so this path is provided but has not been run here.
 
+## Hosted demo
+
+The [frontend](https://logproof-sandeshs-projects-4c5434f4.vercel.app) deploys to Vercel and the [API](https://logproof-api.onrender.com/api/health) deploys to Render from the `master` branch of the private GitHub repository. Vercel's production `NEXT_PUBLIC_API_URL` is `https://logproof-api.onrender.com`. The backend permits the exact production frontend origin plus localhost; additional origins can be supplied with comma-separated `LOGPROOF_ALLOWED_ORIGINS`.
+
+The hosted API uses Render's free web service and stores its SQLite database and raw receipts on the service's temporary filesystem. It may sleep when idle and its data resets when the service restarts or redeploys. The hosted workspace is shared and unauthenticated, so use only the supplied synthetic logs; keep sensitive or real production logs in a controlled local deployment.
+
 ## Pricing proposal
 
 The **Pricing** section presents an illustrative India-market packaging proposal from the supplied pricing reference: Community, Team, Secure, Enterprise / Government, and a 12-week paid pilot. Its rupee amounts are proposal figures, not live commercial terms. Daily ingest limits, HA, RBAC, signed packs, air-gap bundle flows, and support levels are proposed targets and have not been demonstrated by this prototype. Hardware, storage, taxes, travel, and custom integrations would need separate scoping.
