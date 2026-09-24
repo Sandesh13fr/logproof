@@ -78,6 +78,7 @@ app = FastAPI(title="LogProof local API", version="0.1.0")
 allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://logproof.younix.xyz",
     "https://logproof.vercel.app",
     "https://logproof-sandeshs-projects-4c5434f4.vercel.app",
 ]
