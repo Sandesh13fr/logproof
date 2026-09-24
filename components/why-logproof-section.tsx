@@ -60,7 +60,7 @@ const platforms = [
   {
     name: "Datadog Observability Pipelines",
     role: "Processes and routes data in the customer environment, with pipeline simulation.",
-    fit: "LogProof focuses on local raw evidence, field lineage, and the review trail for a changed parser.",
+    fit: "LogProof focuses on preserved raw evidence, field lineage, and the review trail for a changed parser.",
     href: "https://docs.datadoghq.com/observability_pipelines/configuration/set_up_pipelines/",
   },
   {
@@ -112,9 +112,9 @@ export function WhyLogProofSection({
           <h1 id="why-title">Make every parsed field answerable.</h1>
           <p>
             LogProof exists to make the step between raw security logs and
-            downstream decisions inspectable. The local demo preserves the
-            original, explains what the parser produced, holds uncertain
-            records, and checks changes before promotion.
+            downstream decisions inspectable. The demo preserves the original,
+            explains what the parser produced, holds uncertain records, and
+            checks changes before promotion.
           </p>
           <div className="why-hero-actions">
             <Button onClick={() => onNavigate("evidence")}>
@@ -276,7 +276,7 @@ export function WhyLogProofSection({
         </div>
       </div>
       <p className="why-scope-note">
-        Demonstrated here: local raw-byte retention and integrity check, field
+        Demonstrated here: raw-byte retention and integrity check, field
         mapping, shape-drift signal, quarantine, equal-corpus replay,
         human-approved promotion, and rollback. Production connectors, full OCSF
         mapping, signed packs, air-gap distribution, and throughput claims
