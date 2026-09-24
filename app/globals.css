@@ -849,6 +849,25 @@ textarea:focus-visible {
 .event-rail [data-slot="card-content"] {
   padding: 0 12px 15px;
 }
+.event-rail .pagination-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+.event-rail .pagination-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+.event-rail .pagination-page {
+  grid-column: 1 / -1;
+}
+.event-rail .pagination-controls button {
+  min-width: 0;
+  justify-content: center;
+  padding-inline: 8px;
+}
 .search-box {
   display: flex;
   align-items: center;
