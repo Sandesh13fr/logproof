@@ -191,12 +191,6 @@ type Registry = {
 };
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const HOSTED = API.startsWith("https://");
-let hostedAccessKey = "";
-function apiFetch(path: string, options: RequestInit = {}) {
-  const headers = new Headers(options.headers);
-  if (hostedAccessKey) headers.set("X-LogProof-Key", hostedAccessKey);
-  return fetch(`${API}${path}`, { ...options, headers, cache: "no-store" });
-}
 const PAGE_SIZE = 20;
 const MAX_BATCH_CHARS = 2_000_000;
 const istTime = new Intl.DateTimeFormat("en-GB", {
@@ -266,7 +260,7 @@ async function call<T>(
   method = "GET",
   body?: unknown,
 ): Promise<T> {
-  const response = await apiFetch(path, {
+  const response = await fetch(`${API}${path}`, {
     method,
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -500,36 +494,7 @@ export default function Home() {
     '<165>1 2026-09-24T18:04:56.000+05:30 edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44"] Accepted publickey for analyst',
   );
   const [batchInput, setBatchInput] = useState(NDJSON_EXAMPLE);
-  const [accessKeyInput, setAccessKeyInput] = useState("");
-  const [unlocked, setUnlocked] = useState(!HOSTED);
-  const [accessError, setAccessError] = useState("");
-  useEffect(() => {
-    if (!HOSTED) return;
-    const saved = window.sessionStorage.getItem("logproof-access-key") || "";
-    if (!saved) return;
-    hostedAccessKey = saved;
-    void call<Overview>("/api/overview")
-      .then(() => setUnlocked(true))
-      .catch(() => {
-        hostedAccessKey = "";
-        window.sessionStorage.removeItem("logproof-access-key");
-      });
-  }, []);
-  async function unlockWorkspace() {
-    hostedAccessKey = accessKeyInput.trim();
-    setAccessError("");
-    try {
-      await call<Overview>("/api/overview");
-      window.sessionStorage.setItem("logproof-access-key", hostedAccessKey);
-      setAccessKeyInput("");
-      setUnlocked(true);
-    } catch {
-      hostedAccessKey = "";
-      setAccessError("Access key is incorrect, or the API is unavailable.");
-    }
-  }
   const refresh = useCallback(async () => {
-    if (HOSTED && !hostedAccessKey) return;
     try {
       const [nextOverview, nextEvents, nextRegistry] = await Promise.all([
         call<Overview>("/api/overview"),
@@ -700,7 +665,7 @@ export default function Home() {
     setError("");
     setNotice("");
     try {
-      const response = await apiFetch(`/api/ingest/${rawSource}`, {
+      const response = await fetch(`${API}/api/ingest/${rawSource}`, {
         method: "POST",
         headers: { "Content-Type": "text/plain; charset=utf-8" },
         body: rawInput,
@@ -730,7 +695,7 @@ export default function Home() {
     setError("");
     setNotice("");
     try {
-      const response = await apiFetch("/api/ingest/batch", {
+      const response = await fetch(`${API}/api/ingest/batch`, {
         method: "POST",
         headers: { "Content-Type": "application/x-ndjson; charset=utf-8" },
         body: batchInput,
@@ -759,7 +724,7 @@ export default function Home() {
     setError("");
     setNotice("");
     try {
-      const response = await apiFetch("/api/events/export.ndjson");
+      const response = await fetch(`${API}/api/events/export.ndjson`, { cache: "no-store" });
       if (!response.ok) throw new Error((await response.text()).slice(0, 180) || `Request failed: ${response.status}`);
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
@@ -815,36 +780,6 @@ export default function Home() {
     start = selectedField?.byte_start,
     end = selectedField?.byte_end;
 
-  if (HOSTED && !unlocked) {
-    return (
-      <main className="content" style={{ maxWidth: 560, margin: "10vh auto" }}>
-        <Card className="panel">
-          <CardHeader>
-            <CardTitle>Open LogProof workspace</CardTitle>
-            <CardDescription>
-              Enter the workspace access key to use hosted ingestion, evidence, replay, and parser controls.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={(event) => { event.preventDefault(); void unlockWorkspace(); }}>
-              <label htmlFor="access-key">Workspace access key</label>
-              <input
-                id="access-key"
-                type="password"
-                autoComplete="off"
-                value={accessKeyInput}
-                onChange={(event) => setAccessKeyInput(event.target.value)}
-                style={{ display: "block", width: "100%", margin: "0.75rem 0" }}
-              />
-              {accessError && <p role="alert">{accessError}</p>}
-              <Button type="submit" disabled={!accessKeyInput.trim()}>Open workspace</Button>
-            </form>
-          </CardContent>
-        </Card>
-      </main>
-    );
-  }
-
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -886,7 +821,7 @@ export default function Home() {
               {overview?.dataset_samples
                 ? `${overview.dataset_samples} PUBLIC SAMPLES`
                 : HOSTED
-                  ? "ACCESS KEY REQUIRED"
+                  ? "PUBLIC SHARED DATA"
                   : "OFFLINE READY"}
           </div>
           <div className="sidebar-small">
@@ -904,13 +839,6 @@ export default function Home() {
             <strong>{tabs.find((item) => item.id === tab)?.label}</strong>
           </div>
           <div className="topbar-right">
-            {HOSTED && (
-              <Button variant="ghost" size="sm" onClick={() => {
-                hostedAccessKey = "";
-                window.sessionStorage.removeItem("logproof-access-key");
-                window.location.reload();
-              }}>Lock workspace</Button>
-            )}
             <span className="demo-chip">
               <span className="pulse-dot" /> SYSTEM{" "}
               {error ? "DISCONNECTED" : HOSTED ? "HOSTED" : "LOCAL"}
@@ -1175,7 +1103,7 @@ export default function Home() {
               <Heading
                 eyebrow="01 / INGEST"
                 title="Live ingestion"
-                description="Simulated, pasted, and imported events receive a receipt before parsing."
+                description={HOSTED ? "Public shared workspace: uploaded raw logs, evidence, exports, and parser changes are visible to every visitor. Use sample logs only." : "Simulated, pasted, and imported events receive a receipt before parsing."}
                 action={
                   <div className="heading-actions">
                     <Button
@@ -1329,7 +1257,7 @@ export default function Home() {
                   </div>
                   <CardDescription>
                     {HOSTED
-                      ? "Hosted receipts are visible to anyone with this workspace key. Use only synthetic or non-sensitive sample logs; the workspace may reset after a service restart."
+                      ? "Hosted receipts are visible to every visitor. Use only synthetic or non-sensitive sample logs; the workspace may reset after a service restart."
                       : "Import a small sample from WitFoo’s 114M-event sanitized production SOC capture. The original syslog message is stored locally with its normalized fields and dataset attribution; the full dataset is never downloaded."}
                   </CardDescription>
                 </CardHeader>
