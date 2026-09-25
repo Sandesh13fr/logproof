@@ -82,6 +82,16 @@ def test_size_limits_reject_before_storing(platform):
     assert client.get("/api/overview").json()["accepted"] == before
 
 
+def test_deeply_nested_input_is_quarantined_without_server_error(platform):
+    _, client = platform
+    raw = b'{"timestamp":"2026-09-24T18:04:56+05:30","message":"nested","extra":' + b"[" * 1100 + b"0" + b"]" * 1100 + b"}"
+    response = client.post("/api/ingest/json_application", content=raw)
+    assert response.status_code == 200
+    item = response.json()
+    assert item["quality"]["status"] == "quarantined"
+    assert client.get(f"/api/evidence/{item['receipt_id']}").json()["hash_verified"] is True
+
+
 def test_malformed_drift_replay_and_registry_gates(platform):
     _, client = platform
     drift = client.post("/api/simulator/scenario/mapping-failure").json()["events"][0]

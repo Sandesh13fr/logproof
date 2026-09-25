@@ -96,9 +96,9 @@ python -m pip install pip-audit
 python -m pip_audit -r backend/requirements.txt
 ```
 
-The eight HTTP-level test cases use isolated temporary databases. They cover all ten source families; IST receipt times and UTC normalized instants; raw-byte hashes; single and batch ingestion; binary export; input-size and batch-count limits; quarantine and drift; replay gates, approval and rollback; search bounds and SQL-injection-shaped input; unknown IDs; CORS; and public-demo write restrictions and storage separation. The smoke check additionally covers CSV and LEEF parsing, LEEF 1.0 tabs and a LEEF 2.0 hex delimiter, mixed-source NDJSON round trips, and the labeled parser-evaluation fixtures.
+The nine HTTP-level test cases use isolated temporary databases. They cover all ten source families; IST receipt times and UTC normalized instants; raw-byte hashes; single and batch ingestion; binary export; input-size and batch-count limits; quarantine of deeply nested input; drift; replay gates, approval and rollback; search bounds and SQL-injection-shaped input; unknown IDs; CORS; and public-demo write restrictions and storage separation. The smoke check additionally covers CSV and LEEF parsing, LEEF 1.0 tabs and a LEEF 2.0 hex delimiter, mixed-source NDJSON round trips, and the labeled parser-evaluation fixtures.
 
-On 25 September 2026, the eight HTTP cases, smoke check, frontend lint and production build passed. `npm audit --omit=dev` and `pip-audit -r backend/requirements.txt` reported no known advisories at that time. Dependency audits are snapshots, not a guarantee against undisclosed issues.
+On 25 September 2026, the nine HTTP cases, smoke check, frontend lint and production build passed. `npm audit --omit=dev` and `pip-audit -r backend/requirements.txt` reported no known advisories at that time. Dependency audits are snapshots, not a guarantee against undisclosed issues.
 
 ### Public demo safety
 

@@ -724,7 +724,7 @@ def ingest_bytes(source: str, raw: bytes, source_context: dict[str, Any] | None 
         version = registry()["active"] if source == "paloalto_firewall" else "1.0.0"
         try:
             fields, mapping, errors, shape = parse(raw, source, version, source_context)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
             fields, mapping, shape = {}, {}, {}
             errors = ["parser_unavailable" if isinstance(exc, OSError) else "parser_failure"]
         drift = drift_for(source, shape, version)
