@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import csv
 import base64
 import binascii
@@ -30,6 +31,7 @@ from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_DEMO = os.environ.get("LOGPROOF_PUBLIC_DEMO", "").lower() in ("1", "true", "yes")
+ACCESS_KEY = os.environ.get("LOGPROOF_ACCESS_KEY", "")
 MAX_PUBLIC_EVENTS = 1000
 DATA = Path(os.environ.get("LOGPROOF_DATA", ROOT / "data")).resolve()
 if PUBLIC_DEMO:
@@ -107,7 +109,11 @@ app = FastAPI(title="LogProof local API", version="0.1.0")
 
 @app.middleware("http")
 async def public_demo_guard(request: Request, call_next: Any) -> Any:
-    if PUBLIC_DEMO and request.method == "POST" and (
+    if ACCESS_KEY and request.url.path.startswith("/api/") and request.url.path != "/api/health":
+        supplied_key = request.headers.get("x-logproof-key", "")
+        if not hmac.compare_digest(supplied_key, ACCESS_KEY):
+            return JSONResponse(status_code=401, content={"detail": "Workspace access key required"})
+    if PUBLIC_DEMO and not ACCESS_KEY and request.method == "POST" and (
         request.url.path.startswith("/api/ingest/")
         or request.url.path in (
             "/api/datasets/witfoo/import", "/api/parser/approve", "/api/parser/rollback"
@@ -711,7 +717,7 @@ def ingest_bytes(source: str, raw: bytes, source_context: dict[str, Any] | None 
     if not raw or len(raw) > MAX_EVENT_BYTES:
         raise HTTPException(400, "Raw event must be 1 to 256000 bytes")
     with LOCK:
-        if PUBLIC_DEMO:
+        if PUBLIC_DEMO and not ACCESS_KEY:
             with connect() as db:
                 if db.execute("SELECT count(*) FROM events").fetchone()[0] >= MAX_PUBLIC_EVENTS:
                     raise HTTPException(429, "Public demo event limit reached; reset the demo to continue")

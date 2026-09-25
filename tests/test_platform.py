@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 def platform(tmp_path, monkeypatch):
     monkeypatch.setenv("LOGPROOF_DATA", str(tmp_path))
     monkeypatch.delenv("LOGPROOF_PUBLIC_DEMO", raising=False)
+    monkeypatch.delenv("LOGPROOF_ACCESS_KEY", raising=False)
     sys.modules.pop("backend.main", None)
     api = importlib.import_module("backend.main")
     with TestClient(api.app) as client:
@@ -159,6 +160,38 @@ def test_public_demo_uses_separate_data_directory(tmp_path, monkeypatch):
         with TestClient(api.app) as client:
             assert client.get("/api/events/page").json()["total"] == 10
             assert "private marker" not in client.get("/api/events/export.ndjson").text
+    finally:
+        api.stop()
+        sys.modules.pop("backend.main", None)
+
+
+def test_hosted_key_unlocks_full_workflow_and_protects_reads(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOGPROOF_DATA", str(tmp_path))
+    monkeypatch.setenv("LOGPROOF_PUBLIC_DEMO", "1")
+    monkeypatch.setenv("LOGPROOF_ACCESS_KEY", "test-secret-key")
+    sys.modules.pop("backend.main", None)
+    api = importlib.import_module("backend.main")
+    try:
+        with TestClient(api.app) as client:
+            raw = b'{"timestamp":"2026-09-24T18:04:56+05:30","message":"hosted marker","user":"analyst"}'
+            assert client.get("/api/health").status_code == 200
+            for path in ("/api/overview", "/api/events", "/api/events/export.ndjson", "/api/parser/registry"):
+                assert client.get(path).status_code == 401
+            assert client.post("/api/ingest/json_application", content=raw).status_code == 401
+            assert client.get("/api/events", headers={"X-LogProof-Key": "wrong"}).status_code == 401
+            client.headers["X-LogProof-Key"] = "test-secret-key"
+            item = client.post("/api/ingest/json_application", content=raw).json()
+            assert item["quality"]["status"] == "accepted"
+            assert client.get(f"/api/evidence/{item['receipt_id']}").json()["hash_verified"] is True
+            assert b"hosted marker" in client.get("/api/events/export.ndjson").content
+            result = client.post("/api/ingest/batch", content=json.dumps({
+                "source_id": "json_application", "raw": raw.decode()
+            })).json()
+            assert result["accepted"] == 1
+            assert client.post("/api/simulator/scenario/reset").status_code == 200
+            assert client.post("/api/replay").json()["promotion_ready"] is True
+            assert client.post("/api/parser/approve", json={"approved_by": "Hosted test"}).status_code == 200
+            assert client.post("/api/parser/rollback").status_code == 200
     finally:
         api.stop()
         sys.modules.pop("backend.main", None)
