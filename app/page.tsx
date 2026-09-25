@@ -193,18 +193,42 @@ const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const HOSTED = API.startsWith("https://");
 const PAGE_SIZE = 20;
 const MAX_BATCH_CHARS = 2_000_000;
+const istTime = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Kolkata",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const istTimestamp = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Kolkata",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+function displayEventTime(value: unknown): string {
+  if (typeof value !== "string") return String(value ?? "—");
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : `${istTimestamp.format(parsed)} IST`;
+}
 const NDJSON_EXAMPLE = [
   {
     source_id: "csv_network",
-    raw: "timestamp,action,src_ip,dst_ip,src_port,dst_port,protocol,severity\n2026-09-24T12:34:56Z,allowed,198.51.100.21,203.0.113.10,52340,443,TCP,2",
+    raw: "timestamp,action,src_ip,dst_ip,src_port,dst_port,protocol,severity\n2026-09-24T18:04:56+05:30,allowed,198.51.100.21,203.0.113.10,52340,443,TCP,2",
   },
   {
     source_id: "leef_security",
-    raw: "LEEF:2.0|LogProof Labs|Edge Sensor|1.0|BLOCKED_FLOW|^|devTime=2026-09-24T12:34:56Z^src=198.51.100.23^dst=203.0.113.40^srcPort=51642^dstPort=443^proto=TCP^sev=8^cat=Blocked outbound connection^action=deny",
+    raw: "LEEF:2.0|LogProof Labs|Edge Sensor|1.0|BLOCKED_FLOW|^|devTime=2026-09-24T18:04:56+05:30^src=198.51.100.23^dst=203.0.113.40^srcPort=51642^dstPort=443^proto=TCP^sev=8^cat=Blocked outbound connection^action=deny",
   },
   {
     source_id: "syslog_rfc5424",
-    raw: '<165>1 2026-09-24T12:34:56.000Z edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44"] Accepted publickey for analyst',
+    raw: '<165>1 2026-09-24T18:04:56.000+05:30 edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44"] Accepted publickey for analyst',
   },
 ].map((record) => JSON.stringify(record)).join("\n");
 const names: Record<string, string> = {
@@ -467,7 +491,7 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [rawSource, setRawSource] = useState("syslog_rfc5424");
   const [rawInput, setRawInput] = useState(
-    '<165>1 2026-09-24T12:34:56.000Z edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44"] Accepted publickey for analyst',
+    '<165>1 2026-09-24T18:04:56.000+05:30 edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44"] Accepted publickey for analyst',
   );
   const [batchInput, setBatchInput] = useState(NDJSON_EXAMPLE);
   const refresh = useCallback(async () => {
@@ -1079,12 +1103,12 @@ export default function Home() {
               <Heading
                 eyebrow="01 / INGEST"
                 title="Live ingestion"
-                description="Simulated, pasted, and imported events receive a receipt before parsing."
+                description={HOSTED ? "This shared demo accepts synthetic simulator events only. Use a local instance for your own logs." : "Simulated, pasted, and imported events receive a receipt before parsing."}
                 action={
                   <div className="heading-actions">
                     <Button
                       variant="outline"
-                      disabled={!!busy}
+                      disabled={HOSTED || !!busy}
                       onClick={() => void importWitFoo()}
                     >
                       <Download data-icon="inline-start" />
@@ -1137,7 +1161,7 @@ export default function Home() {
                   </div>
                 }
               />
-              <Card className="panel raw-ingest-panel">
+              {!HOSTED && <Card className="panel raw-ingest-panel">
                 <CardHeader>
                   <CardTitle>Process a raw event</CardTitle>
                   <CardDescription>
@@ -1183,8 +1207,8 @@ export default function Home() {
                     </Button>
                   </div>
                 </CardContent>
-              </Card>
-              <Card className="panel raw-ingest-panel">
+              </Card>}
+              {!HOSTED && <Card className="panel raw-ingest-panel">
                 <CardHeader>
                   <div className="panel-title-row">
                     <CardTitle>NDJSON batch transfer</CardTitle>
@@ -1224,7 +1248,7 @@ export default function Home() {
                     </div>
                   </div>
                 </CardContent>
-              </Card>
+              </Card>}
               <Card className="panel">
                 <CardHeader>
                   <div className="panel-title-row">
@@ -1232,14 +1256,16 @@ export default function Home() {
                     <span className="tiny-muted">AUTO REFRESH · 2.5S</span>
                   </div>
                   <CardDescription>
-                    Import a small sample from WitFoo’s 114M-event sanitized production SOC capture. The original syslog message is stored locally with its normalized fields and dataset attribution; the full dataset is never downloaded.
+                    {HOSTED
+                      ? "This shared demo holds synthetic simulator receipts only. Reset the demo after reaching its 1,000-event limit."
+                      : "Import a small sample from WitFoo’s 114M-event sanitized production SOC capture. The original syslog message is stored locally with its normalized fields and dataset attribution; the full dataset is never downloaded."}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="table-scroll">
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Time</TableHead>
+                        <TableHead>Time (IST)</TableHead>
                         <TableHead>Source</TableHead>
                         <TableHead>Format</TableHead>
                         <TableHead>Status</TableHead>
@@ -1252,7 +1278,7 @@ export default function Home() {
                         liveData.items.map((item) => (
                           <TableRow key={item.event_id}>
                             <TableCell className="mono">
-                              {item.received_at.slice(11, 19)}
+                              {istTime.format(new Date(item.received_at))}
                             </TableCell>
                             <TableCell className="cell-strong">
                               {names[item.source_id]}
@@ -1490,7 +1516,7 @@ export default function Home() {
                           <CardHeader>
                             <CardTitle>Normalized record</CardTitle>
                             <CardDescription>
-                              Click a mapped field to locate its source.
+                              Times shown in IST. Click a mapped field to locate its source.
                             </CardDescription>
                           </CardHeader>
                           <CardContent>
@@ -1504,22 +1530,19 @@ export default function Home() {
                                   >
                                     <span>{key}</span>
                                     <code>
-                                      {String(
-                                        key
-                                          .split(".")
-                                          .reduce<unknown>(
-                                            (value, part) =>
-                                              value && typeof value === "object"
-                                                ? (
-                                                    value as Record<
-                                                      string,
-                                                      unknown
-                                                    >
-                                                  )[part]
-                                                : null,
-                                            selectedEvent.normalized,
-                                          ) ?? "—",
-                                      )}
+                                      {key === "event_time"
+                                        ? displayEventTime(selectedEvent.normalized.event_time)
+                                        : String(
+                                            key
+                                              .split(".")
+                                              .reduce<unknown>(
+                                                (value, part) =>
+                                                  value && typeof value === "object"
+                                                    ? (value as Record<string, unknown>)[part]
+                                                    : null,
+                                                selectedEvent.normalized,
+                                              ) ?? "—",
+                                          )}
                                     </code>
                                     <ChevronRight aria-hidden="true" />
                                   </button>
@@ -1957,8 +1980,9 @@ export default function Home() {
                             : "Candidate is not ready"}
                         </h3>
                         <p>
-                          Promotion records the approver and retains the
-                          previous version as a rollback target.
+                          {HOSTED
+                            ? "Parser promotion is available in a local instance. Public visitors can inspect the replay result."
+                            : "Promotion records the approver and retains the previous version as a rollback target."}
                         </p>
                       </div>
                       <div className="approval-actions">
@@ -1971,7 +1995,7 @@ export default function Home() {
                           placeholder="Your name"
                         />
                         <Button
-                          disabled={!replay.promotion_ready || !!busy}
+                          disabled={HOSTED || !replay.promotion_ready || !!busy}
                           onClick={() =>
                             approval.trim()
                               ? void act(
@@ -2014,7 +2038,7 @@ export default function Home() {
                 action={
                   <Button
                     variant="outline"
-                    disabled={!registry?.state.rollback || !!busy}
+                    disabled={HOSTED || !registry?.state.rollback || !!busy}
                     onClick={() => void act("Rollback", "/api/parser/rollback")}
                   >
                     <RotateCcw data-icon="inline-start" /> Roll back parser

@@ -7,6 +7,7 @@ import tempfile
 import asyncio
 import base64
 import json
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -18,6 +19,12 @@ with tempfile.TemporaryDirectory(prefix="logproof-smoke-") as directory:
     scenario("reset")
     assert overview()["accepted"] == 10
     assert all(item["normalized"]["event_time"].endswith("Z") for item in events())
+    assert all(item["received_at"].endswith("+05:30") for item in events())
+    assert all(
+        abs((datetime.fromisoformat(item["received_at"]) -
+             datetime.fromisoformat(item["normalized"]["event_time"].replace("Z", "+00:00"))).total_seconds()) < 2
+        for item in events()
+    )
     source_events = {item["source_id"]: item for item in events()}
     assert source_events["syslog_rfc5424"]["quality"]["status"] == "accepted"
     assert source_events["syslog_rfc5424"]["normalized"]["application"] == "sshd"

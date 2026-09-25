@@ -19,17 +19,21 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
+PUBLIC_DEMO = os.environ.get("LOGPROOF_PUBLIC_DEMO", "").lower() in ("1", "true", "yes")
+MAX_PUBLIC_EVENTS = 1000
 DATA = Path(os.environ.get("LOGPROOF_DATA", ROOT / "data")).resolve()
+if PUBLIC_DEMO:
+    DATA = DATA / "public-demo"
 RAW = DATA / "raw"
 DB = DATA / "logproof.sqlite3"
 RAW.mkdir(parents=True, exist_ok=True)
@@ -60,10 +64,11 @@ STOP = threading.Event()
 WORKER: threading.Thread | None = None
 RATES = {source: 1 for source in SOURCES}
 ENABLED = {source: True for source in SOURCES}
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(IST).isoformat(timespec="seconds")
 
 
 @contextmanager
@@ -98,6 +103,18 @@ def initialize() -> None:
 
 initialize()
 app = FastAPI(title="LogProof local API", version="0.1.0")
+
+
+@app.middleware("http")
+async def public_demo_guard(request: Request, call_next: Any) -> Any:
+    if PUBLIC_DEMO and request.method == "POST" and (
+        request.url.path.startswith("/api/ingest/")
+        or request.url.path in (
+            "/api/datasets/witfoo/import", "/api/parser/approve", "/api/parser/rollback"
+        )
+    ):
+        return JSONResponse(status_code=403, content={"detail": "This public demo accepts synthetic simulator events only"})
+    return await call_next(request)
 allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -335,7 +352,19 @@ def parse(raw: bytes, source: str, version: str, source_context: dict[str, Any] 
             mapping[normalized_key] = source_value(raw, source_key, value)
         if source == "paloalto_firewall" and "event_time" in fields:
             stamp = fields["event_time"]
-            if not isinstance(stamp, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", stamp):
+            try:
+                if not isinstance(stamp, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})", stamp):
+                    raise ValueError("timestamp needs an explicit timezone")
+                fields["event_time"] = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                mapping["event_time"]["transform"] = "Firewall timestamp normalized to UTC"
+            except ValueError:
+                errors.append("invalid_timestamp_pattern")
+        elif source in ("windows_security", "json_application") and "event_time" in fields:
+            try:
+                stamp = datetime.fromisoformat(str(fields["event_time"]).replace("Z", "+00:00"))
+                fields["event_time"] = stamp.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                mapping["event_time"]["transform"] = "Source timestamp normalized to UTC"
+            except ValueError:
                 errors.append("invalid_timestamp_pattern")
         if source == "paloalto_firewall":
             fields["category"] = "network_activity"
@@ -348,15 +377,15 @@ def parse(raw: bytes, source: str, version: str, source_context: dict[str, Any] 
             errors.append("syslog_pattern_mismatch")
         else:
             try:
-                parsed_time = datetime.strptime(f"{datetime.now(timezone.utc).year} {match['timestamp']}", "%Y %b %d %H:%M:%S").replace(tzinfo=timezone.utc)
-                event_time = parsed_time.isoformat().replace("+00:00", "Z")
+                parsed_time = datetime.strptime(f"{datetime.now(IST).year} {match['timestamp']}", "%Y %b %d %H:%M:%S").replace(tzinfo=IST)
+                event_time = parsed_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
             except ValueError:
                 event_time = match["timestamp"]
                 errors.append("invalid_timestamp_pattern")
             fields.update(category="network_activity", action=match["action"], severity=int(match["severity"]), event_time=event_time)
             mapping = {k: source_value(raw, k, v) for k, v in fields.items() if k != "category"}
             mapping["event_time"] = source_value(raw, "timestamp", match["timestamp"])
-            mapping["event_time"]["transform"] = "RFC3164 time + receipt year to UTC"
+            mapping["event_time"]["transform"] = "RFC3164 time assumed IST + receipt year to UTC"
     elif source == "syslog_rfc5424":
         match = re.match(
             r"<(?P<pri>\d{1,3})>1 (?P<timestamp>\S+) (?P<host>\S+) (?P<app>\S+) (?P<procid>\S+) (?P<msgid>\S+) (?P<sd>(?:\[[^\]]*\]|-))(?: (?P<message>.*))?",
@@ -682,6 +711,10 @@ def ingest_bytes(source: str, raw: bytes, source_context: dict[str, Any] | None 
     if not raw or len(raw) > MAX_EVENT_BYTES:
         raise HTTPException(400, "Raw event must be 1 to 256000 bytes")
     with LOCK:
+        if PUBLIC_DEMO:
+            with connect() as db:
+                if db.execute("SELECT count(*) FROM events").fetchone()[0] >= MAX_PUBLIC_EVENTS:
+                    raise HTTPException(429, "Public demo event limit reached; reset the demo to continue")
         receipt = f"rcpt_{uuid.uuid4().hex[:16]}"
         event_id = f"evt_{uuid.uuid4().hex[:16]}"
         path = RAW / f"{receipt}.bin"
@@ -761,27 +794,28 @@ def get_event(event_id: str) -> dict[str, Any]:
 
 
 def sample(source: str, sequence: int, drift: bool = False) -> bytes:
-    stamp = "2026-09-24T12:34:56Z"
+    generated_at = datetime.now(IST)
+    stamp = generated_at.isoformat(timespec="seconds")
     if source == "paloalto_firewall":
         obj = {"timestamp": stamp, "action": "allow", "src_ip": f"10.24.8.{(sequence % 200) + 10}", "dst_ip": "172.16.4.20",
                "rule": {"name": "allow-web", "revision": 2} if drift else "allow-web", "severity": 2}
         return json.dumps(obj, separators=(",", ":")).encode()
     if source == "cisco_router":
-        return b"Sep 24 12:34:56 edge-01 %LINK-3-UPDOWN: Interface GigabitEthernet0/1 changed state to up"
+        return f"{generated_at:%b %d %H:%M:%S} edge-01 %LINK-3-UPDOWN: Interface GigabitEthernet0/1 changed state to up".encode()
     if source == "syslog_rfc5424":
-        return b'<165>1 2026-09-24T12:34:56.000Z edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44" software="sshd"] Accepted publickey for analyst'
+        return f'<165>1 {generated_at.isoformat(timespec="milliseconds")} edge-01 sshd 1842 AUTH_SUCCESS [origin ip="192.0.2.44" software="sshd"] Accepted publickey for analyst'.encode()
     if source == "cef_security":
-        stamp_ms = int(datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        stamp_ms = int(generated_at.timestamp() * 1000)
         return f"CEF:0|Palo Alto Networks|PAN-OS|11.1|THREAT|Suspicious connection|8|rt={stamp_ms} src=198.51.100.23 dst=203.0.113.40 spt=51642 dpt=443 proto=TCP act=deny msg=Blocked outbound connection".encode()
     if source == "nginx_access":
-        return b'203.0.113.14 - - [24/Sep/2026:12:34:56 +0000] "GET /api/health HTTP/1.1" 200 52'
+        return f'203.0.113.14 - - [{generated_at:%d/%b/%Y:%H:%M:%S %z}] "GET /api/health HTTP/1.1" 200 52'.encode()
     if source == "windows_security":
         return json.dumps({"TimeCreated": stamp, "EventID": "4624", "TargetUserName": "analyst"}, separators=(",", ":")).encode()
     if source == "windows_event_xml":
         return (
             '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">'
             '<System><Provider Name="Microsoft-Windows-Security-Auditing"/><EventID>4624</EventID>'
-            '<Level>4</Level><TimeCreated SystemTime="2026-09-24T12:34:56.000Z"/>'
+            f'<Level>4</Level><TimeCreated SystemTime="{generated_at.isoformat(timespec="milliseconds")}"/>'
             '<Channel>Security</Channel><Computer>WORKSTATION-07</Computer></System>'
             '<EventData><Data Name="TargetUserName">analyst</Data>'
             '<Data Name="IpAddress">198.51.100.23</Data></EventData></Event>'
@@ -883,7 +917,17 @@ async def ingest_batch(request: Request) -> dict[str, Any]:
 
 @app.post("/api/ingest/{source_id}")
 async def ingest(source_id: str, request: Request) -> dict[str, Any]:
-    return ingest_bytes(source_id, await request.body())
+    declared_length = request.headers.get("content-length")
+    if declared_length and declared_length.isdigit() and int(declared_length) > MAX_EVENT_BYTES:
+        raise HTTPException(413, f"Raw event is limited to {MAX_EVENT_BYTES} bytes")
+    chunks: list[bytes] = []
+    byte_count = 0
+    async for chunk in request.stream():
+        byte_count += len(chunk)
+        if byte_count > MAX_EVENT_BYTES:
+            raise HTTPException(413, f"Raw event is limited to {MAX_EVENT_BYTES} bytes")
+        chunks.append(chunk)
+    return ingest_bytes(source_id, b"".join(chunks))
 
 
 @app.get("/api/events/export.ndjson")
@@ -999,7 +1043,7 @@ def events(limit: int = 60) -> list[dict[str, Any]]:
 
 
 @app.get("/api/events/page")
-def events_page(limit: int = 20, offset: int = 0, q: str = "") -> dict[str, Any]:
+def events_page(limit: int = 20, offset: int = 0, q: str = Query(default="", max_length=200)) -> dict[str, Any]:
     page_limit = max(1, min(limit, 100))
     page_offset = max(0, offset)
     search = q.strip()
@@ -1074,7 +1118,7 @@ def scenario(scenario_id: str) -> dict[str, Any]:
     elif scenario_id == "mapping-failure":
         created = [ingest_bytes("paloalto_firewall", sample("paloalto_firewall", 7, True))]
     elif scenario_id == "malformed":
-        created = [ingest_bytes("paloalto_firewall", b'{"timestamp":"2026-09-24T12:34:56Z","rule":')]
+        created = [ingest_bytes("paloalto_firewall", f'{{"timestamp":"{now()}","rule":'.encode())]
     elif scenario_id == "reset":
         STOP.set()
         if WORKER and WORKER.is_alive():
@@ -1102,7 +1146,13 @@ def generator() -> None:
         for source in SOURCES:
             if ENABLED[source]:
                 for _ in range(RATES[source]):
-                    ingest_bytes(source, sample(source, counter))
+                    try:
+                        ingest_bytes(source, sample(source, counter))
+                    except HTTPException as exc:
+                        if PUBLIC_DEMO and exc.status_code == 429:
+                            STOP.set()
+                            return
+                        raise
                     counter += 1
 
 

@@ -20,7 +20,7 @@ LogProof stores each received event before parsing, maps normalized fields back 
 
 ## Formats in the demo
 
-The simulator creates ten sample source families across eight raw formats. In **Live ingestion**, you can paste one event (up to 256 KB), import a mixed-format NDJSON batch, or export all event records. Samples are synthetic unless identified as the optional WitFoo dataset import.
+The simulator creates ten sample source families across eight raw formats. New simulator logs use the current India Standard Time (IST, UTC+05:30); receipt times in the dashboard also show IST. The canonical `event_time` in the API and exports remains UTC so records from different sources can be compared by instant. Previously stored raw evidence is unchanged. In **Live ingestion**, you can paste one event (up to 256 KB), import a mixed-format NDJSON batch, or export all event records. Samples are synthetic unless identified as the optional WitFoo dataset import.
 
 | Sample source | Raw format | Example fields or behavior |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ The simulator creates ten sample source families across eight raw formats. In **
 | Network flow | CSV | Header plus one row; timestamp, action, IPs, ports, protocol and severity |
 | Security device | LEEF 1.0 / 2.0 | Event ID, vendor/product, device time, source/destination, protocol and severity |
 
-The CSV parser accepts one event per input with its header row. NDJSON batches contain one envelope per line: `{"source_id":"csv_network","raw":"timestamp,action\\n2026-09-24T12:34:56Z,allowed"}`. For non-UTF-8 event bytes, use `raw_base64` instead of `raw`. A batch may mix source IDs and raw formats. It is limited to 100 events, 2 MB total, and 256 KB per raw event; malformed or unknown-source lines are reported individually while valid records still receive their own raw evidence, receipt, and hash. Export is one complete stored event object per line at `GET /api/events/export.ndjson`, including the original raw text or base64 bytes for byte-exact round trips.
+The CSV parser accepts one event per input with its header row. NDJSON batches contain one envelope per line: `{"source_id":"csv_network","raw":"timestamp,action\\n2026-09-24T18:04:56+05:30,allowed"}`. For non-UTF-8 event bytes, use `raw_base64` instead of `raw`. A batch may mix source IDs and raw formats. It is limited to 100 events, 2 MB total, and 256 KB per raw event; malformed or unknown-source lines are reported individually while valid records still receive their own raw evidence, receipt, and hash. Export is one complete stored event object per line at `GET /api/events/export.ndjson`, including the original raw text or base64 bytes for byte-exact round trips.
 
 LEEF parsing covers common 1.0 tab-separated attributes and 2.0 literal/hex attribute delimiters. IBM describes LEEF headers, the tab delimiter, and the LEEF 2.0 alternate delimiter in its [LEEF event components reference](https://www.ibm.com/docs/en/qradar-on-cloud?topic=overview-leef-event-components). This parser supports representative fields and ISO 8601 or epoch timestamps; it is not a full implementation of every vendor extension. The Cisco parser recognizes the demo's common RFC 3164-style pattern, not every RFC 3164 variant. RFC 5424, CEF, and Windows XML are likewise prototype parsers. An optional bounded import fetches sanitized events from the [WitFoo Precinct6 dataset](https://huggingface.co/datasets/witfoo/precinct6-cybersecurity-100m); it does not download the full dataset and requires network access.
 
@@ -86,12 +86,25 @@ Open <http://localhost:3100>. The API is available at <http://127.0.0.1:8100>. S
 ## Verify the demo
 
 ```powershell
+python -m pip install -r backend/requirements-test.txt
+python -m pytest -q tests/test_platform.py
 python scripts/smoke.py
 npm run lint
 npm run build
+npm audit --omit=dev
+python -m pip install pip-audit
+python -m pip_audit -r backend/requirements.txt
 ```
 
-The smoke check uses a temporary database and verifies the ten source samples, CSV and LEEF parsing, LEEF 1.0 tabs and a LEEF 2.0 hex delimiter, mixed-source NDJSON import/export, raw-hash checks, malformed-input quarantine, firewall drift, parser replay, approval, rollback, and the labeled parser-evaluation fixtures.
+The eight HTTP-level test cases use isolated temporary databases. They cover all ten source families; IST receipt times and UTC normalized instants; raw-byte hashes; single and batch ingestion; binary export; input-size and batch-count limits; quarantine and drift; replay gates, approval and rollback; search bounds and SQL-injection-shaped input; unknown IDs; CORS; and public-demo write restrictions and storage separation. The smoke check additionally covers CSV and LEEF parsing, LEEF 1.0 tabs and a LEEF 2.0 hex delimiter, mixed-source NDJSON round trips, and the labeled parser-evaluation fixtures.
+
+On 25 September 2026, the eight HTTP cases, smoke check, frontend lint and production build passed. `npm audit --omit=dev` and `pip-audit -r backend/requirements.txt` reported no known advisories at that time. Dependency audits are snapshots, not a guarantee against undisclosed issues.
+
+### Public demo safety
+
+Set `LOGPROOF_PUBLIC_DEMO=1` on the public Render API. This uses a separate `public-demo` data directory, rejects direct log uploads, batch imports, WitFoo imports, parser approvals and rollbacks, and stops synthetic ingestion at 1,000 stored events until reset. The Vercel frontend hides private-log upload controls when its API URL uses HTTPS. Local runs keep the full import and approval workflow. Single-event HTTP bodies are capped at 256 KB before buffering; batch bodies are capped at 2 MB, and search terms at 200 characters.
+
+The public demo is shared and has no visitor identity or per-user isolation. Anyone can reset its synthetic records. Do not submit private or production logs to the public URL. CORS limits browser origins but is not authentication. The local API also has no user authentication, so bind it to loopback or protect it with network access controls when using real data. Raw evidence and exports are readable to anyone who can reach an unrestricted local API. These controls reduce the identified exposure and storage-abuse paths; they are not a production security assessment.
 
 ### Parser evaluation
 
